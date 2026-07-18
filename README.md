@@ -351,11 +351,31 @@ Windows 无法创建符号链接时，相关路径逃逸测试会跳过；Linux/
 
 ### `check-ready` 报路径不可写
 
-确认 OpenClaw 容器内存在 `/volume2/downloads/.incoming`，运行用户对下载区有写权限，并且 Compose 挂载没有写错卷。
+确认 OpenClaw 容器内存在 `/volume2/downloads/.incoming`，运行用户对下载区有写权限，并且 Compose 挂载没有写错卷。创建目录时请保证 aria2 的 `nobody` 用户可写（建议 `.incoming` / `.ready` / `.quarantine` 为 `777`，或 chown 给 aria2 运行用户）。
 
 ### aria2 可以连接但任务路径不对
 
 检查 aria2 是否把同一个主机下载目录挂载为 `/nas/downloads`。本项目提交给 aria2 的保存路径以 `/nas/downloads/.incoming/...` 开头。
+
+### aria2 任务立刻 error 18（Download aborted）且 `.incoming` 为空
+
+`aria2-pro` 里的 `aria2c` 通常以 `nobody` 运行。若主机上 `/volume2/downloads/.incoming` 是 `770 root:root`，nobody 无法建目录，任务会马上 abort，磁盘上看不到文件。
+
+处理：
+
+```bash
+chmod 777 /volume2/downloads/.incoming /volume2/downloads/.ready /volume2/downloads/.quarantine
+```
+
+然后重新执行下载（或让 QAS 再推一次）。QAS 日志里若已有 `📥 Aria2下载`，说明转存已成功，问题在本机写权限，不在夸克。
+
+### 夸克网盘里找不到转存
+
+转存账号以 QAS Cookie 为准（当前常见昵称在 QAS 日志的「转存账号」一行）。云盘路径是 ASCII 任务目录，例如：
+
+`/OpenClaw/Others/rd-<taskid>`
+
+不要按中文剧名在「最近」或「影视」根目录找；早期中文路径会因 `illegal text` 建目录失败。
 
 ### 搜索结果很少
 
