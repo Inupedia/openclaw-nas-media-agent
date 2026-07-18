@@ -47,6 +47,8 @@ class DownloadPlanner:
             except ClientError:
                 continue
             score = score_candidate(query, candidate, details)
+            if "archive_only" in score.penalties:
+                continue
             results.append(
                 {
                     "shareurl": share_url,

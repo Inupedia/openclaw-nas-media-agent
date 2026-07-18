@@ -129,6 +129,70 @@ class PlannerTests(unittest.TestCase):
         self.assertGreaterEqual(result["selected"]["score"], 70)
         self.assertFalse(result["requiresConfirmation"])
 
+    def test_search_never_selects_archive_only_candidate(self):
+        archive_url = "https://pan.quark.cn/s/archive"
+        video_url = "https://pan.quark.cn/s/video"
+        qas = FakeQas(
+            candidates=[
+                {
+                    "taskname": "庆余年2 全36集 1080P",
+                    "content": "",
+                    "shareurl": archive_url,
+                },
+                {
+                    "taskname": "庆余年2 S02E01 1080P",
+                    "content": "",
+                    "shareurl": video_url,
+                },
+            ],
+            shares={
+                archive_url: {
+                    "share": {"title": "庆余年2 全36集"},
+                    "list": [
+                        {"file_name": f"{episode:02d}.zip", "dir": False}
+                        for episode in range(1, 37)
+                    ],
+                },
+                video_url: {
+                    "share": {"title": "庆余年2 S02E01"},
+                    "list": [
+                        {
+                            "file_name": "庆余年2.S02E01.1080P.mkv",
+                            "dir": False,
+                        }
+                    ],
+                },
+            },
+        )
+
+        result = self.make_planner(qas).plan("庆余年2 S02E01")
+
+        self.assertEqual(result["selected"]["shareurl"], video_url)
+
+    def test_search_rejects_when_every_candidate_is_archive_only(self):
+        archive_url = "https://pan.quark.cn/s/archive"
+        qas = FakeQas(
+            candidates=[
+                {
+                    "taskname": "庆余年2 全36集",
+                    "content": "",
+                    "shareurl": archive_url,
+                }
+            ],
+            shares={
+                archive_url: {
+                    "share": {"title": "庆余年2 全36集"},
+                    "list": [
+                        {"file_name": "01.zip", "dir": False},
+                        {"file_name": "02.zip", "dir": False},
+                    ],
+                }
+            },
+        )
+
+        with self.assertRaisesRegex(PlanningError, "no valid"):
+            self.make_planner(qas).plan("庆余年2")
+
     def test_close_candidate_scores_require_confirmation(self):
         urls = ["https://pan.quark.cn/s/a", "https://pan.quark.cn/s/b"]
         candidates = [
