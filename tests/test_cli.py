@@ -1,12 +1,17 @@
+import contextlib
+import io
+import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from resource_agent import AgentError, ResourceAgent
+from resource_agent import AgentError, ResourceAgent, main
 from state_store import StateStore
 
 
@@ -179,6 +184,20 @@ class ResourceAgentTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["nextAction"], "configure_qas_cookie")
+
+    def test_main_emits_versioned_safe_error(self):
+        output = io.StringIO()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with contextlib.redirect_stdout(output):
+                exit_code = main(["check-ready"])
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(result["schemaVersion"], 1)
+        self.assertTrue(result["terminal"])
+        self.assertEqual(result["error"]["code"], "AGENT_ERROR")
+        self.assertNotIn("traceback", output.getvalue().lower())
 
 
 if __name__ == "__main__":

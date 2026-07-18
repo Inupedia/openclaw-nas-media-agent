@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from aria2_client import Aria2Client
+from output_contract import failure, success
 from planner import DownloadPlanner, PlanningError
 from qas_client import ClientError, QasClient
 from state_store import StateStore
@@ -255,44 +256,67 @@ def main(argv=None) -> int:
                 for route in routing.values()
             ]
             unique_roots = list(dict.fromkeys(roots))
-            result = agent.check_ready(unique_roots)
+            ready = agent.check_ready(unique_roots)
+            if ready.get("ok"):
+                result = success(
+                    ready.get("data"),
+                    next_action=ready.get("nextAction", "ready"),
+                )
+            else:
+                result = failure(
+                    "NOT_READY",
+                    ready.get("error", "runtime is not ready"),
+                    next_action=ready.get("nextAction", "review_error"),
+                )
         elif args.command == "search":
-            result = {"ok": True, "data": {"candidates": qas.search(args.query)}}
+            result = success(
+                {"candidates": qas.search(args.query)},
+                next_action="choose_candidate",
+            )
         elif args.command == "plan-download":
-            result = {
-                "ok": True,
-                "data": planner.plan(
+            result = success(
+                planner.plan(
                     args.query_or_url,
                     query_hint=args.query_hint,
                 ),
-            }
+                next_action="review_plan",
+            )
         elif args.command == "execute":
-            result = {
-                "ok": True,
-                "data": planner.execute(
+            result = success(
+                planner.execute(
                     args.plan_id,
                     confirmed=args.confirmed,
                 ),
-            }
+                next_action="monitor_download",
+            )
         elif args.download_command == "list":
-            result = {"ok": True, "data": agent.downloads_list()}
+            result = success(
+                agent.downloads_list(),
+                next_action="none",
+            )
         elif args.download_command == "show":
-            result = {"ok": True, "data": agent.downloads_show(args.task_id)}
+            result = success(
+                agent.downloads_show(args.task_id),
+                next_action="none",
+            )
         else:
-            result = {
-                "ok": True,
-                "data": agent.downloads_control(
+            result = success(
+                agent.downloads_control(
                     args.task_id,
                     args.download_command,
                 ),
-            }
+                next_action="none",
+            )
     except (AgentError, ClientError, PlanningError) as error:
-        result = {
-            "ok": False,
-            "data": None,
-            "error": str(error),
-            "nextAction": "review_error",
-        }
+        result = failure(
+            {
+                AgentError: "AGENT_ERROR",
+                ClientError: "CLIENT_ERROR",
+                PlanningError: "PLANNING_ERROR",
+            }.get(type(error), "AGENT_ERROR"),
+            str(error),
+            next_action="review_error",
+        )
     finally:
         if store is not None:
             store.close()
