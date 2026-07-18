@@ -35,7 +35,10 @@ class RecordingQas:
 
     def get_share(self, url, show_all=True):
         self.reads.append(("share", url, show_all))
-        return self.shares[url]
+        result = self.shares[url]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def add_task(self, task):
         self.writes.append(("add", task))
@@ -85,7 +88,19 @@ class MediaServiceTests(unittest.TestCase):
                     "content": "HEVC 中文字幕",
                     "shareurl": url,
                 }
-            ]
+            ],
+            shares={
+                url: {
+                    "share": {"title": "Movie 2024"},
+                    "list": [
+                        {
+                            "file_name": "Movie.2024.1080p.HEVC.mkv",
+                            "dir": False,
+                            "size": 1_000,
+                        }
+                    ],
+                }
+            },
         )
         service = MediaService(
             FakeCatalog({"found": False, "queryTitle": "沙丘2", "matches": []}),
@@ -105,6 +120,87 @@ class MediaServiceTests(unittest.TestCase):
         self.assertNotIn(url, serialized)
         self.assertNotIn("shareurl", serialized.lower())
         self.assertEqual(qas.writes, [])
+
+    def test_search_lists_every_distinct_spec_without_auto_selection(self):
+        urls = [f"https://pan.quark.cn/s/variant-{index}" for index in range(3)]
+        qas = RecordingQas(
+            candidates=[
+                {"taskname": "Example 4K", "shareurl": urls[0]},
+                {"taskname": "Example 1080p", "shareurl": urls[1]},
+                {"taskname": "Example 1080p small", "shareurl": urls[2]},
+            ],
+            shares={
+                urls[0]: {
+                    "share": {"title": "Example"},
+                    "list": [
+                        {
+                            "file_name": (
+                                "Example.S01E01.2160p.DV.HEVC.Atmos.mkv"
+                            ),
+                            "size": 8_000,
+                        },
+                        {
+                            "file_name": "Example.S01E01.chs-eng.ass",
+                            "size": 10,
+                        },
+                    ],
+                },
+                urls[1]: {
+                    "share": {"title": "Example"},
+                    "list": [
+                        {
+                            "file_name": "Example.S01E01.1080p.H264.mkv",
+                            "size": 4_000,
+                        },
+                        {
+                            "file_name": "Example.S01E01.chs.ass",
+                            "size": 10,
+                        },
+                    ],
+                },
+                urls[2]: {
+                    "share": {"title": "Example"},
+                    "list": [
+                        {
+                            "file_name": "Example.S01E01.1080p.HEVC.mkv",
+                            "size": 2_000,
+                        },
+                        {
+                            "file_name": "Example.S01E01.chs-eng.ass",
+                            "size": 10,
+                        },
+                    ],
+                },
+            },
+        )
+        service = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "Example", "matches": []}),
+            qas,
+            self.store,
+        )
+
+        result = service.search("Example", "drama")
+
+        self.assertEqual(result["data"]["candidateCount"], 3)
+        self.assertEqual(len(result["data"]["specificationGroups"]), 3)
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["specification"][
+                "subtitleClass"
+            ],
+            "zh_en",
+        )
+        self.assertEqual(
+            {
+                candidate["specification"]["resolution"]
+                for candidate in result["data"]["remoteCandidates"]
+            },
+            {"2160p", "1080p"},
+        )
+        self.assertNotIn("selectedCandidateId", result["data"])
+        self.assertEqual(
+            len([read for read in qas.reads if read[0] == "share"]),
+            3,
+        )
 
     def test_preview_reads_share_without_writing_or_returning_share_url(self):
         url = "https://pan.quark.cn/s/secret-share"

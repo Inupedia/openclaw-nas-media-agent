@@ -5,7 +5,12 @@ from episode_diff import (
     normalize_title_key,
     select_incremental_files,
 )
+from media_classifier import (
+    ARCHIVE_EXTENSIONS,
+    extract_candidate_spec,
+)
 from output_contract import success
+from qas_client import ClientError
 from state_store import StateStore
 
 
@@ -38,9 +43,32 @@ class MediaService:
             return self._search_update(query, media_type, local)
 
         projected = []
+        rejected = {}
         for candidate in self.qas.search(query, deep=True):
             share_url = candidate.get("shareurl") or candidate.get("url")
             if not share_url:
+                self._count_rejection(rejected, "missing_share")
+                continue
+            try:
+                details = self.qas.get_share(share_url, show_all=True)
+            except ClientError:
+                self._count_rejection(rejected, "expired_or_unavailable")
+                continue
+            items = list(details.get("list", []) or [])
+            names = [
+                str(item.get("file_name", ""))
+                for item in items
+                if item.get("file_name") and not item.get("dir")
+            ]
+            if not names:
+                self._count_rejection(rejected, "empty")
+                continue
+            if all(name.casefold().endswith(ARCHIVE_EXTENSIONS) for name in names):
+                self._count_rejection(rejected, "archive_only")
+                continue
+            specification = extract_candidate_spec(details)
+            if not specification["videoFileCount"]:
+                self._count_rejection(rejected, "no_video")
                 continue
             candidate_id = self.store.create_candidate(
                 {
@@ -48,6 +76,8 @@ class MediaService:
                     "mediaType": media_type,
                     "shareurl": share_url,
                     "candidate": candidate,
+                    "details": details,
+                    "specification": specification,
                 }
             )
             projected.append(
@@ -59,14 +89,19 @@ class MediaService:
                         or "未命名候选"
                     ),
                     "provider": "quark",
+                    "specification": self._safe_specification(specification),
                 }
             )
 
+        projected.sort(key=self._candidate_sort_key)
         return success(
             {
                 "local": local,
                 "missing": [],
                 "remoteCandidates": projected,
+                "specificationGroups": self._group_candidates(projected),
+                "candidateCount": len(projected),
+                "rejectedCandidateCounts": rejected,
             },
             terminal=not projected,
             next_action="choose_candidate" if projected else "no_candidates",
@@ -138,6 +173,7 @@ class MediaService:
                 selection_failed = True
                 continue
             serialized_missing = self._serialize_episodes(missing)
+            specification = extract_candidate_spec(details)
             candidate_id = self.store.create_candidate(
                 {
                     "query": query,
@@ -149,6 +185,7 @@ class MediaService:
                     "selectedFiles": selection["files"],
                     "existingEpisodes": self._serialize_episodes(local_keys),
                     "newEpisodes": serialized_missing,
+                    "specification": specification,
                 }
             )
             projected.append(
@@ -161,6 +198,7 @@ class MediaService:
                     ),
                     "provider": "quark",
                     "newEpisodes": serialized_missing,
+                    "specification": self._safe_specification(specification),
                 }
             )
 
@@ -188,11 +226,15 @@ class MediaService:
                     else "no_candidates"
                 ),
             )
+        projected.sort(key=self._candidate_sort_key)
         return success(
             {
                 "local": local,
                 "missing": self._serialize_episodes(all_missing),
                 "remoteCandidates": projected,
+                "specificationGroups": self._group_candidates(projected),
+                "candidateCount": len(projected),
+                "rejectedCandidateCounts": {},
             },
             terminal=False,
             next_action="choose_candidate",
@@ -210,6 +252,86 @@ class MediaService:
             }
             for item in sorted(episodes)
         ]
+
+    @staticmethod
+    def _count_rejection(counts: dict, reason: str) -> None:
+        counts[reason] = int(counts.get(reason, 0)) + 1
+
+    @staticmethod
+    def _safe_specification(specification: dict) -> dict:
+        return {
+            key: value
+            for key, value in specification.items()
+            if key != "groupKey"
+        }
+
+    @staticmethod
+    def _candidate_sort_key(candidate: dict) -> tuple:
+        specification = candidate["specification"]
+        subtitle_order = {
+            "zh_en": 0,
+            "zh": 1,
+            "en": 2,
+            "unknown": 3,
+            "none": 4,
+        }
+        resolution = str(specification.get("resolution", "unknown"))
+        resolution_value = (
+            int(resolution[:-1])
+            if resolution.endswith("p") and resolution[:-1].isdigit()
+            else 0
+        )
+        return (
+            subtitle_order.get(specification.get("subtitleClass"), 5),
+            -resolution_value,
+            int(specification.get("totalBytes") or 0),
+            candidate["candidateId"],
+        )
+
+    @classmethod
+    def _group_candidates(cls, candidates: list[dict]) -> list[dict]:
+        groups = {}
+        for candidate in candidates:
+            specification = candidate["specification"]
+            coverage = tuple(
+                (
+                    int(item.get("season", 0)),
+                    int(item.get("episode", 0)),
+                )
+                for item in specification.get("episodeCoverage", [])
+            )
+            key = (
+                specification.get("resolution"),
+                specification.get("dynamicRange"),
+                specification.get("videoCodec"),
+                specification.get("audioFormat"),
+                specification.get("subtitleClass"),
+                coverage,
+            )
+            group = groups.setdefault(
+                key,
+                {
+                    "specification": specification,
+                    "candidates": [],
+                },
+            )
+            group["candidates"].append(
+                {
+                    "candidateId": candidate["candidateId"],
+                    "title": candidate["title"],
+                    "provider": candidate["provider"],
+                    "totalBytes": specification.get("totalBytes", 0),
+                    **(
+                        {"newEpisodes": candidate["newEpisodes"]}
+                        if candidate.get("newEpisodes")
+                        else {}
+                    ),
+                }
+            )
+        result = list(groups.values())
+        for group in result:
+            group["candidateCount"] = len(group["candidates"])
+        return result
 
     def preview(self, candidate_id: str) -> dict:
         candidate = self.store.get_candidate(candidate_id)
