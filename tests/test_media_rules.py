@@ -90,7 +90,7 @@ class NamingTests(unittest.TestCase):
 
         self.assertEqual(normalized, "黑镜")
 
-    def test_movie_paths_follow_volume_three_rule(self):
+    def test_movie_uses_unified_download_area_then_volume_three_final(self):
         classification = classify(
             "沙丘2 2024",
             share("沙丘2.2024.1080P.mkv"),
@@ -100,7 +100,7 @@ class NamingTests(unittest.TestCase):
 
         self.assertEqual(
             paths["staging_path"],
-            "/volume3/临时影视/.incoming/rd-123",
+            "/volume2/downloads/.incoming/rd-123",
         )
         self.assertEqual(
             paths["final_path"],
@@ -108,7 +108,7 @@ class NamingTests(unittest.TestCase):
         )
         self.assertEqual(
             paths["aria2_save_path"],
-            "临时影视/.incoming/rd-123",
+            "downloads/.incoming/rd-123",
         )
 
 

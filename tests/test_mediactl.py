@@ -65,6 +65,20 @@ class MediaCtlContractTests(unittest.TestCase):
         self.assertEqual(args.media_type, "anime")
         self.assertTrue(args.update)
 
+    def test_parser_supports_validation_and_separate_organize_plan(self):
+        validate = parse_args(["downloads", "validate", "rd-show"])
+        organize_plan = parse_args(["organize", "plan", "rd-show"])
+        organize_execute = parse_args(
+            ["organize", "execute", "plan-example", "--confirmed"]
+        )
+
+        self.assertEqual(validate.download_command, "validate")
+        self.assertEqual(validate.task_id, "rd-show")
+        self.assertEqual(organize_plan.organize_command, "plan")
+        self.assertEqual(organize_plan.task_id, "rd-show")
+        self.assertEqual(organize_execute.organize_command, "execute")
+        self.assertTrue(organize_execute.confirmed)
+
     def test_unknown_command_is_bounded_error(self):
         with self.assertRaisesRegex(CliUsageError, "invalid command"):
             parse_args(["shell", "curl", "http://example"])

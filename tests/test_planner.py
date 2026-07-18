@@ -83,12 +83,12 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["classification"]["mediaType"], "movie")
         self.assertEqual(
             result["stagingPath"].rsplit("/", 1)[0],
-            "/volume3/临时影视/.incoming",
+            "/volume2/downloads/.incoming",
         )
         self.assertEqual(task["savepath"], "/OpenClaw/Movies/沙丘2 (2024)")
         self.assertEqual(
             task["addition"]["aria2"]["save_path"].split("/")[0],
-            "临时影视",
+            "downloads",
         )
         self.assertTrue(task["addition"]["aria2"]["auto_download"])
         self.assertIn("zip", task["pattern"])

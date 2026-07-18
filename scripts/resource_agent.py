@@ -2,13 +2,17 @@
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 from aria2_client import Aria2Client
 from library_catalog import LibraryCatalog
 from media_service import MediaService
+from organizer import DownloadValidator, OrganizeError, Organizer
 from output_contract import failure, success
+from path_guard import PathGuard
 from planner import DownloadPlanner, PlanningError
 from qas_client import ClientError, QasClient
 from state_store import PlanError, StateStore
@@ -273,9 +277,21 @@ def parse_args(argv) -> argparse.Namespace:
     downloads_sub.add_parser("list")
     show = downloads_sub.add_parser("show")
     show.add_argument("task_id")
+    validate = downloads_sub.add_parser("validate")
+    validate.add_argument("task_id")
     for command in ("pause", "resume", "cancel"):
         control = downloads_sub.add_parser(command)
         control.add_argument("task_id")
+    organize = subparsers.add_parser("organize")
+    organize_sub = organize.add_subparsers(
+        dest="organize_command",
+        required=True,
+    )
+    organize_plan = organize_sub.add_parser("plan")
+    organize_plan.add_argument("task_id")
+    organize_execute = organize_sub.add_parser("execute")
+    organize_execute.add_argument("plan_id")
+    organize_execute.add_argument("--confirmed", action="store_true")
 
     return parser.parse_args(list(argv))
 
@@ -301,11 +317,60 @@ def _default_service_factory(routing, store, qas):
     return MediaService(LibraryCatalog(roots), qas, store)
 
 
+def _ffprobe_runner(path: Path) -> bool:
+    binary = shutil.which("ffprobe")
+    if not binary:
+        return True
+    completed = subprocess.run(
+        [
+            binary,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            "--",
+            str(path),
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    return completed.returncode == 0
+
+
+def _default_organizer_factory(routing, store):
+    downloads_root = Path(routing["downloads"]["root"])
+    roots = [
+        downloads_root,
+        *[
+            Path(route["final_root"])
+            for route in routing.values()
+            if isinstance(route, dict) and route.get("final_root")
+        ],
+    ]
+    guard = PathGuard(roots)
+    validator = DownloadValidator(
+        store,
+        guard,
+        downloads_root,
+        ffprobe_runner=_ffprobe_runner,
+    )
+    return Organizer(
+        store,
+        guard,
+        downloads_root,
+        validator=validator,
+    )
+
+
 def main(
     argv=None,
     *,
     runtime_loader=_load_runtime,
     service_factory=_default_service_factory,
+    organizer_factory=_default_organizer_factory,
     stream=None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -366,6 +431,21 @@ def main(
                 ),
                 next_action="monitor_download",
             )
+        elif args.command == "organize":
+            organizer = organizer_factory(routing, store)
+            if args.organize_command == "plan":
+                result = success(
+                    organizer.plan(args.task_id),
+                    next_action="review_organize_plan",
+                )
+            else:
+                result = success(
+                    organizer.execute(
+                        args.plan_id,
+                        confirmed=getattr(args, "confirmed", False),
+                    ),
+                    next_action="none",
+                )
         elif args.download_command == "list":
             result = success(
                 agent.downloads_list(),
@@ -375,6 +455,20 @@ def main(
             result = success(
                 agent.downloads_show(args.task_id),
                 next_action="none",
+            )
+        elif args.download_command == "validate":
+            organizer = organizer_factory(routing, store)
+            report = organizer.validator.validate(args.task_id)
+            result = success(
+                {
+                    "taskId": args.task_id,
+                    "valid": report.ok,
+                    "problems": list(report.problems),
+                    "fileCount": len(report.manifest),
+                    "totalBytes": sum(report.manifest.values()),
+                },
+                terminal=True,
+                next_action=report.next_action,
             )
         else:
             result = success(
@@ -390,11 +484,19 @@ def main(
             str(error),
             next_action="use_mediactl_help",
         )
-    except (AgentError, ClientError, PlanningError, PlanError) as error:
+    except (
+        AgentError,
+        ClientError,
+        OrganizeError,
+        PlanningError,
+        PlanError,
+    ) as error:
         result = failure(
             (
                 "CLIENT_ERROR"
                 if isinstance(error, ClientError)
+                else "ORGANIZE_ERROR"
+                if isinstance(error, OrganizeError)
                 else "PLANNING_ERROR"
                 if isinstance(error, (PlanningError, PlanError))
                 else "AGENT_ERROR"
