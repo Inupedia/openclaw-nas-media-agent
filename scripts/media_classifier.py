@@ -193,3 +193,147 @@ def score_candidate(
         reasons=reasons,
         penalties=penalties,
     )
+
+
+def extract_candidate_spec(share: dict) -> dict:
+    items = [
+        item
+        for item in _files(share)
+        if not item.get("dir") and item.get("file_name")
+    ]
+    names = [str(item.get("file_name", "")) for item in items]
+    title = str(share.get("share", {}).get("title", ""))
+    text = " ".join([title, *names])
+    lower = text.casefold()
+
+    resolution = "unknown"
+    for value, pattern in (
+        ("2160p", r"(?i)\b(?:2160p|4k|uhd)\b"),
+        ("1080p", r"(?i)\b1080[pi]?\b"),
+        ("720p", r"(?i)\b720[pi]?\b"),
+        ("480p", r"(?i)\b480[pi]?\b"),
+    ):
+        if re.search(pattern, text):
+            resolution = value
+            break
+
+    if re.search(r"(?i)\b(?:dolby[ ._-]?vision|dovi|dv)\b", text):
+        dynamic_range = "dolby_vision"
+    elif re.search(r"(?i)\b(?:hdr10\+?|hdr)\b", text):
+        dynamic_range = "hdr"
+    elif re.search(r"(?i)\bsdr\b", text):
+        dynamic_range = "sdr"
+    else:
+        dynamic_range = "unknown"
+
+    if re.search(r"(?i)\bav1\b", text):
+        video_codec = "av1"
+    elif re.search(r"(?i)\b(?:hevc|h[ .]?265|x265)\b", text):
+        video_codec = "hevc"
+    elif re.search(r"(?i)\b(?:avc|h[ .]?264|x264)\b", text):
+        video_codec = "h264"
+    else:
+        video_codec = "unknown"
+
+    if re.search(r"(?i)\batmos\b", text):
+        audio_format = "atmos"
+    elif re.search(r"(?i)\btruehd\b", text):
+        audio_format = "truehd"
+    elif re.search(r"(?i)\bdts(?:-hd)?\b", text):
+        audio_format = "dts"
+    elif re.search(r"(?i)\baac\b", text):
+        audio_format = "aac"
+    else:
+        audio_format = "unknown"
+
+    subtitle_names = [
+        name for name in names if name.casefold().endswith(SUBTITLE_EXTENSIONS)
+    ]
+    video_names = [
+        name for name in names if name.casefold().endswith(VIDEO_EXTENSIONS)
+    ]
+    subtitle_text = " ".join(subtitle_names)
+    embedded_text = " ".join(video_names)
+    bilingual_pattern = (
+        r"(?i)(?:chs?[-_. &]+eng|chi[-_. &]+eng|zh[-_. &]+en|"
+        r"中英|双语字幕)"
+    )
+    chinese_pattern = r"(?i)(?:\bchs?\b|\bcht\b|\bchi\b|\bzh[-_](?:cn|tw)\b|chinese|中文|中字|简体|繁体)"
+    english_pattern = r"(?i)(?:\beng\b|\ben\b|english|英文|英字)"
+    subtitle_evidence = " ".join([subtitle_text, embedded_text])
+    has_bilingual = bool(re.search(bilingual_pattern, subtitle_evidence))
+    has_chinese = bool(re.search(chinese_pattern, subtitle_evidence))
+    has_english = bool(re.search(english_pattern, subtitle_evidence))
+    if has_bilingual or (has_chinese and has_english):
+        subtitle_class = "zh_en"
+    elif has_chinese:
+        subtitle_class = "zh"
+    elif has_english:
+        subtitle_class = "en"
+    elif re.search(r"(?i)\b(?:no[ ._-]?sub|raw)\b|无字幕", text):
+        subtitle_class = "none"
+    else:
+        subtitle_class = "unknown"
+
+    external = bool(subtitle_names)
+    embedded = any(
+        re.search(pattern, embedded_text)
+        for pattern in (
+            bilingual_pattern,
+            chinese_pattern,
+            english_pattern,
+        )
+    )
+    if external and embedded:
+        subtitle_form = "mixed"
+    elif external:
+        subtitle_form = "external"
+    elif embedded:
+        subtitle_form = "embedded"
+    else:
+        subtitle_form = "unknown"
+
+    episode_pairs = {
+        (int(season), int(episode))
+        for season, episode in re.findall(
+            r"(?i)\bS(\d{1,2})E(\d{1,3})\b",
+            text,
+        )
+    }
+    episode_coverage = [
+        {"season": season, "episode": episode}
+        for season, episode in sorted(episode_pairs)
+    ]
+    total_bytes = 0
+    for item in items:
+        try:
+            total_bytes += max(0, int(item.get("size") or 0))
+        except (TypeError, ValueError):
+            continue
+
+    group_key = "|".join(
+        (
+            resolution,
+            dynamic_range,
+            video_codec,
+            audio_format,
+            subtitle_class,
+            ",".join(
+                f"S{item['season']:02d}E{item['episode']:03d}"
+                for item in episode_coverage
+            ),
+        )
+    )
+    return {
+        "resolution": resolution,
+        "dynamicRange": dynamic_range,
+        "videoCodec": video_codec,
+        "audioFormat": audio_format,
+        "subtitleClass": subtitle_class,
+        "subtitleForm": subtitle_form,
+        "totalBytes": total_bytes,
+        "fileCount": len(items),
+        "videoFileCount": len(video_names),
+        "episodeCoverage": episode_coverage,
+        "groupKey": group_key,
+    }

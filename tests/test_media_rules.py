@@ -6,7 +6,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from media_classifier import classify, score_candidate
+from media_classifier import classify, extract_candidate_spec, score_candidate
 from media_namer import build_paths, normalize_title
 
 
@@ -149,6 +149,49 @@ class CandidateScoreTests(unittest.TestCase):
         self.assertLess(result.score, 70)
         self.assertIn("cam", result.penalties)
         self.assertIn("archive_only", result.penalties)
+
+
+class CandidateSpecificationTests(unittest.TestCase):
+    def test_extracts_quality_size_and_bilingual_external_subtitles(self):
+        details = {
+            "list": [
+                {
+                    "file_name": (
+                        "Example.S01E01.2160p.DV.HDR.HEVC.Atmos.mkv"
+                    ),
+                    "size": 8_000_000_000,
+                },
+                {
+                    "file_name": "Example.S01E01.chs-eng.ass",
+                    "size": 50_000,
+                },
+            ]
+        }
+
+        result = extract_candidate_spec(details)
+
+        self.assertEqual(result["resolution"], "2160p")
+        self.assertEqual(result["dynamicRange"], "dolby_vision")
+        self.assertEqual(result["videoCodec"], "hevc")
+        self.assertEqual(result["audioFormat"], "atmos")
+        self.assertEqual(result["subtitleClass"], "zh_en")
+        self.assertEqual(result["subtitleForm"], "external")
+        self.assertEqual(result["totalBytes"], 8_000_050_000)
+        self.assertEqual(result["fileCount"], 2)
+        self.assertEqual(
+            result["episodeCoverage"],
+            [{"season": 1, "episode": 1}],
+        )
+
+    def test_unknown_metadata_is_reported_not_invented(self):
+        result = extract_candidate_spec(
+            {"list": [{"file_name": "video.mkv", "size": 100}]}
+        )
+
+        self.assertEqual(result["resolution"], "unknown")
+        self.assertEqual(result["dynamicRange"], "unknown")
+        self.assertEqual(result["subtitleClass"], "unknown")
+        self.assertEqual(result["subtitleForm"], "unknown")
 
 
 if __name__ == "__main__":
