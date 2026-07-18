@@ -73,6 +73,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("/volume2/影视", self.content)
         self.assertIn("/volume3/临时影视", self.content)
         self.assertIn("永远不得删除", self.content)
+        self.assertIn("不得提供手工删除命令", self.content)
+        self.assertIn("不得建议放宽", self.content)
 
 
 if __name__ == "__main__":
