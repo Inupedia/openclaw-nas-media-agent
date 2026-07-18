@@ -1,6 +1,6 @@
 ---
 name: resource-download-agent
-description: Use when 用户要求搜索、查找、预览、推荐或下载电影、电视剧、动画、动漫、综艺、纪录片等影视资源，或要求追更、补集、检查更新、换版本、查看下载状态、暂停、继续、取消、校验、整理、释放空间、压缩或转码。
+description: Use when 用户要求搜索、查找、预览、推荐或下载电影、电视剧、动画、动漫、综艺、纪录片等影视资源，或要求追更、补集、检查更新、换版本、查看下载状态、暂停、继续、取消、删除、校验、整理、释放空间、压缩或转码。
 metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL","QAS_TOKEN","ARIA2_RPC_URL","ARIA2_RPC_SECRET","RESOURCE_AGENT_STATE_DB"]},"envVars":[{"name":"QAS_BASE_URL","required":true,"description":"QAS API endpoint"},{"name":"QAS_TOKEN","required":true,"description":"QAS API credential"},{"name":"ARIA2_RPC_URL","required":true,"description":"aria2 RPC endpoint"},{"name":"ARIA2_RPC_SECRET","required":true,"description":"aria2 RPC credential"},{"name":"RESOURCE_AGENT_STATE_DB","required":true,"description":"Agent state database path"}]}}
 ---
 

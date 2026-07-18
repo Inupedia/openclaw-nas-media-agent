@@ -20,6 +20,7 @@ class SkillContractTests(unittest.TestCase):
             "追更",
             "补集",
             "暂停",
+            "删除",
             "转码",
         ):
             self.assertIn(trigger, self.frontmatter)
