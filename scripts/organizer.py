@@ -248,6 +248,7 @@ class Organizer:
             self.store.upsert_task(task)
 
         if self.same_filesystem(source, final_path):
+            self.guard.assert_deletable(source)
             os.replace(source, final_path)
         else:
             hidden_target = self.guard.resolve_target(
@@ -266,10 +267,16 @@ class Organizer:
                 ):
                     raise OrganizeError("copy verification failed")
                 os.replace(hidden_target, final_path)
+                self.guard.assert_deletable(source)
                 shutil.rmtree(source)
             except Exception:
                 if hidden_target.exists():
-                    shutil.rmtree(hidden_target)
+                    try:
+                        self.guard.assert_deletable(hidden_target)
+                    except PathGuardError:
+                        pass
+                    else:
+                        shutil.rmtree(hidden_target)
                 raise
 
         task["staging_path"] = str(source)

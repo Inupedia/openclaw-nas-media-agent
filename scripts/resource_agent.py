@@ -342,15 +342,23 @@ def _ffprobe_runner(path: Path) -> bool:
 
 def _default_organizer_factory(routing, store):
     downloads_root = Path(routing["downloads"]["root"])
+    protected_roots = [
+        Path("/volume2/影视"),
+        Path("/volume3/临时影视"),
+    ]
     roots = [
         downloads_root,
+        *protected_roots,
         *[
             Path(route["final_root"])
             for route in routing.values()
             if isinstance(route, dict) and route.get("final_root")
         ],
     ]
-    guard = PathGuard(roots)
+    guard = PathGuard(
+        roots,
+        protected_roots=protected_roots,
+    )
     validator = DownloadValidator(
         store,
         guard,

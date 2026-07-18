@@ -17,7 +17,10 @@ class PathGuardTests(unittest.TestCase):
         self.root_b = self.base / "volume3" / "临时影视"
         self.root_a.mkdir(parents=True)
         self.root_b.mkdir(parents=True)
-        self.guard = PathGuard([self.root_a, self.root_b])
+        self.guard = PathGuard(
+            [self.root_a, self.root_b],
+            protected_roots=[self.root_a, self.root_b],
+        )
 
     def tearDown(self):
         self.temp.cleanup()
@@ -53,6 +56,48 @@ class PathGuardTests(unittest.TestCase):
             self.skipTest("symlink creation unavailable")
         with self.assertRaises(PathGuardError):
             self.guard.resolve_target(str(link / "file.mkv"))
+
+    def test_protected_library_children_are_never_deletable(self):
+        media = self.root_a / "Drama" / "Show.mkv"
+        media.parent.mkdir()
+        media.write_bytes(b"video")
+
+        with self.assertRaisesRegex(
+            PathGuardError,
+            "protected media library",
+        ):
+            self.guard.assert_deletable(media)
+
+    def test_existing_protected_target_is_never_replaceable(self):
+        target = self.root_b / "Movie" / "Example"
+        target.mkdir(parents=True)
+
+        with self.assertRaisesRegex(
+            PathGuardError,
+            "protected media library",
+        ):
+            self.guard.assert_replace_target(target)
+
+    def test_symlink_into_protected_library_is_not_deletable(self):
+        staging = self.base / "downloads"
+        staging.mkdir()
+        media = self.root_a / "Drama" / "Show"
+        media.mkdir(parents=True)
+        link = staging / "linked-show"
+        try:
+            link.symlink_to(media, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlink creation unavailable")
+        guard = PathGuard(
+            [staging, self.root_a],
+            protected_roots=[self.root_a],
+        )
+
+        with self.assertRaisesRegex(
+            PathGuardError,
+            "protected media library",
+        ):
+            guard.assert_deletable(link)
 
 
 if __name__ == "__main__":

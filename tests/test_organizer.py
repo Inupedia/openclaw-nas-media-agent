@@ -35,7 +35,11 @@ class OrganizerTests(unittest.TestCase):
                 self.downloads,
                 self.base / "volume2" / "影视",
                 self.base / "volume3" / "临时影视",
-            ]
+            ],
+            protected_roots=[
+                self.base / "volume2" / "影视",
+                self.base / "volume3" / "临时影视",
+            ],
         )
 
     def tearDown(self):
@@ -141,6 +145,12 @@ class OrganizerTests(unittest.TestCase):
 
         self.assertTrue((self.downloads / ".ready" / task["task_id"]).exists())
         self.assertFalse(Path(task["final_path"]).exists())
+        self.assertTrue(
+            (
+                Path(task["final_path"]).parent
+                / f".organizing-{task['task_id']}"
+            ).exists()
+        )
 
     def test_same_volume_organize_moves_ready_directory(self):
         task = self.make_task()
