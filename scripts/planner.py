@@ -114,7 +114,7 @@ class DownloadPlanner:
             "taskname": classification.title,
             "shareurl": selected["shareurl"],
             "savepath": paths["cloud_path"],
-            "pattern": ".*",
+            "pattern": r"(?i)^(?!.*\.(?:zip|rar|7z)$).*$",
             "replace": "",
             "runweek": [1, 2, 3, 4, 5, 6, 7],
             "addition": {

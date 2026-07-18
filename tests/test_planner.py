@@ -91,6 +91,8 @@ class PlannerTests(unittest.TestCase):
             "临时影视",
         )
         self.assertTrue(task["addition"]["aria2"]["auto_download"])
+        self.assertIn("zip", task["pattern"])
+        self.assertIn("?!", task["pattern"])
 
     def test_search_selects_clear_winner(self):
         good_url = "https://pan.quark.cn/s/good"
