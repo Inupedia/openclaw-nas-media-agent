@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import sqlite3
 import time
@@ -30,7 +32,9 @@ class StateStore:
             CREATE TABLE IF NOT EXISTS plans (
               plan_id TEXT PRIMARY KEY,
               action TEXT NOT NULL,
+              schema_version INTEGER NOT NULL DEFAULT 1,
               payload_json TEXT NOT NULL,
+              payload_hash TEXT NOT NULL DEFAULT '',
               created_at INTEGER NOT NULL,
               expires_at INTEGER NOT NULL,
               consumed_at INTEGER
@@ -66,6 +70,20 @@ class StateStore:
                 "PRAGMA table_info(tasks)"
             ).fetchall()
         }
+        plan_columns = {
+            row["name"]
+            for row in self.connection.execute(
+                "PRAGMA table_info(plans)"
+            ).fetchall()
+        }
+        if "schema_version" not in plan_columns:
+            self.connection.execute(
+                "ALTER TABLE plans ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
+        if "payload_hash" not in plan_columns:
+            self.connection.execute(
+                "ALTER TABLE plans ADD COLUMN payload_hash TEXT NOT NULL DEFAULT ''"
+            )
         if "aria2_dir" not in columns:
             self.connection.execute(
                 "ALTER TABLE tasks ADD COLUMN aria2_dir TEXT NOT NULL DEFAULT ''"
@@ -78,7 +96,30 @@ class StateStore:
             self.connection.execute(
                 "ALTER TABLE tasks ADD COLUMN episode_keys_json TEXT NOT NULL DEFAULT '[]'"
             )
+        for row in self.connection.execute(
+            "SELECT plan_id, payload_json FROM plans WHERE payload_hash = ''"
+        ).fetchall():
+            payload = json.loads(row["payload_json"])
+            self.connection.execute(
+                "UPDATE plans SET payload_hash = ? WHERE plan_id = ?",
+                (self._payload_hash(payload), row["plan_id"]),
+            )
         self.connection.commit()
+
+    @staticmethod
+    def _canonical_payload(payload: dict) -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def _payload_hash(cls, payload: dict) -> str:
+        return hashlib.sha256(
+            cls._canonical_payload(payload).encode("utf-8")
+        ).hexdigest()
 
     def create_candidate(
         self,
@@ -136,22 +177,51 @@ class StateStore:
     ) -> str:
         now = int(self.clock())
         plan_id = f"plan-{uuid.uuid4().hex}"
+        payload_json = self._canonical_payload(payload)
+        payload_hash = self._payload_hash(payload)
         self.connection.execute(
             """
             INSERT INTO plans
-              (plan_id, action, payload_json, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)
+              (
+                plan_id, action, schema_version, payload_json, payload_hash,
+                created_at, expires_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 plan_id,
                 action,
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                1,
+                payload_json,
+                payload_hash,
                 now,
                 now + ttl_seconds,
             ),
         )
         self.connection.commit()
         return plan_id
+
+    def _validate_plan_row(self, row, action: str, now: int) -> dict:
+        if row is None:
+            raise PlanError("plan not found")
+        if row["action"] != action:
+            raise PlanError("plan action mismatch")
+        if row["consumed_at"] is not None:
+            raise PlanError("plan already consumed")
+        if row["expires_at"] < now:
+            raise PlanError("plan expired")
+        payload = json.loads(row["payload_json"])
+        actual_hash = self._payload_hash(payload)
+        if not hmac.compare_digest(row["payload_hash"], actual_hash):
+            raise PlanError("plan integrity check failed")
+        return payload
+
+    def read_plan(self, plan_id: str, action: str) -> dict:
+        row = self.connection.execute(
+            "SELECT * FROM plans WHERE plan_id = ?",
+            (plan_id,),
+        ).fetchone()
+        return self._validate_plan_row(row, action, int(self.clock()))
 
     def consume_plan(self, plan_id: str, action: str) -> dict:
         now = int(self.clock())
@@ -161,21 +231,14 @@ class StateStore:
                 "SELECT * FROM plans WHERE plan_id = ?",
                 (plan_id,),
             ).fetchone()
-            if row is None:
-                raise PlanError("plan not found")
-            if row["action"] != action:
-                raise PlanError("plan action mismatch")
-            if row["consumed_at"] is not None:
-                raise PlanError("plan already consumed")
-            if row["expires_at"] < now:
-                raise PlanError("plan expired")
+            payload = self._validate_plan_row(row, action, now)
 
             self.connection.execute(
                 "UPDATE plans SET consumed_at = ? WHERE plan_id = ?",
                 (now, plan_id),
             )
             self.connection.commit()
-            return json.loads(row["payload_json"])
+            return payload
         except Exception:
             self.connection.rollback()
             raise

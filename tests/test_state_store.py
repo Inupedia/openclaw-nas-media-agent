@@ -62,6 +62,17 @@ class StateStoreTests(unittest.TestCase):
             "Test",
         )
 
+    def test_modified_plan_payload_is_rejected(self):
+        plan_id = self.store.create_plan("download", {"title": "Safe"})
+        self.store.connection.execute(
+            "UPDATE plans SET payload_json = ? WHERE plan_id = ?",
+            ('{"title":"Changed"}', plan_id),
+        )
+        self.store.connection.commit()
+
+        with self.assertRaisesRegex(PlanError, "integrity"):
+            self.store.consume_plan(plan_id, "download")
+
     def test_task_persistence_uses_an_allowlist(self):
         self.store.upsert_task(
             {

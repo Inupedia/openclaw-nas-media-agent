@@ -227,6 +227,18 @@ class PlannerTests(unittest.TestCase):
         self.assertTrue(result["requiresConfirmation"])
         self.assertIn("final_path_exists", result["warnings"])
 
+    def test_missing_confirmation_does_not_consume_plan(self):
+        url = "https://pan.quark.cn/s/movie"
+        qas = FakeQas(shares={url: MOVIE_SHARE})
+        planner = self.make_planner(qas, path_exists=lambda _: True)
+        plan = planner.plan(url, query_hint="沙丘2 2024")
+
+        with self.assertRaisesRegex(PlanningError, "requires confirmation"):
+            planner.execute(plan["planId"])
+
+        result = planner.execute(plan["planId"], confirmed=True)
+        self.assertEqual(result["status"], "submitted")
+
     def test_movie_execution_runs_once_without_subscription(self):
         url = "https://pan.quark.cn/s/movie"
         qas = FakeQas(shares={url: MOVIE_SHARE})
@@ -263,6 +275,67 @@ class PlannerTests(unittest.TestCase):
         planner.execute(plan["planId"], confirmed=True)
 
         self.assertEqual(len(qas.added), 1)
+        self.assertEqual(len(qas.ran), 1)
+
+    def test_selected_plan_never_searches_and_hides_internal_task(self):
+        class SearchForbiddenQas(FakeQas):
+            def search(self, query, deep=True):
+                raise AssertionError("planner must not search")
+
+        url = "https://pan.quark.cn/s/show"
+        qas = SearchForbiddenQas()
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Show S01E120",
+                "mediaType": "tv",
+                "titleKey": "show",
+                "shareurl": url,
+                "candidate": {"taskname": "Show S01E120"},
+                "details": {
+                    "share": {"title": "Show S01E120"},
+                    "list": [
+                        {"file_name": "Show.S01E119.mkv", "dir": False},
+                        {"file_name": "Show.S01E120.mkv", "dir": False},
+                    ],
+                },
+                "selectedFiles": ["Show.S01E120.mkv"],
+                "existingEpisodes": [{"season": 1, "episode": 119}],
+                "newEpisodes": [{"season": 1, "episode": 120}],
+            }
+        )
+
+        result = self.make_planner(qas).plan_selected(candidate_id)
+
+        serialized = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn(url, serialized)
+        self.assertNotIn('"task"', serialized)
+        self.assertEqual(
+            result["incremental"]["newEpisodes"],
+            [{"season": 1, "episode": 120}],
+        )
+        stored = self.store.read_plan(result["planId"], "download")
+        self.assertRegex("Show.S01E120.mkv", stored["task"]["pattern"])
+        self.assertNotRegex("Show.S01E119.mkv", stored["task"]["pattern"])
+
+    def test_selected_plan_execution_returns_no_raw_qas_events(self):
+        url = "https://pan.quark.cn/s/movie"
+        qas = FakeQas()
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "沙丘2 2024",
+                "mediaType": "movie",
+                "shareurl": url,
+                "candidate": {"taskname": "沙丘2 2024"},
+                "details": MOVIE_SHARE,
+            }
+        )
+        planner = self.make_planner(qas)
+        plan = planner.plan_selected(candidate_id)
+
+        result = planner.execute(plan["planId"], confirmed=True)
+
+        self.assertEqual(result["status"], "submitted")
+        self.assertNotIn("qas", result)
         self.assertEqual(len(qas.ran), 1)
 
 
