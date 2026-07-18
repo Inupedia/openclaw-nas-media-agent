@@ -49,15 +49,18 @@ class RecordingQas:
 
 
 class RecordingPanSou:
-    def __init__(self, candidates=None, error=None):
+    def __init__(self, candidates=None, error=None, max_candidates=50):
         self.candidates = candidates or []
         self.error = error
         self.reads = []
+        self.max_candidates = max_candidates
 
     def search(self, query):
         self.reads.append(query)
         if self.error:
             raise self.error
+        if isinstance(self.candidates, dict):
+            return list(self.candidates.get(query, []))
         return list(self.candidates)
 
 
@@ -199,6 +202,43 @@ class MediaServiceTests(unittest.TestCase):
         self.assertEqual(result["data"]["warnings"], ["pansou_unavailable"])
         self.assertEqual(pansou.reads, ["Example"])
         self.assertNotIn("private-pansou", json.dumps(result))
+
+    def test_pansou_limit_applies_across_all_query_variants(self):
+        urls = [
+            "https://pan.quark.cn/s/first",
+            "https://pan.quark.cn/s/second",
+            "https://pan.quark.cn/s/third",
+        ]
+        shares = {
+            url: {
+                "share": {"title": "幼女战记"},
+                "list": [{"file_name": f"幼女战记.S02E0{index}.mkv"}],
+            }
+            for index, url in enumerate(urls, start=1)
+        }
+        pansou = RecordingPanSou(
+            candidates={
+                "幼女战记2": [
+                    {"taskname": "first", "shareurl": urls[0]},
+                ],
+                "幼女战记": [
+                    {"taskname": "second", "shareurl": urls[1]},
+                ],
+                "幼女战记 第2季": [
+                    {"taskname": "third", "shareurl": urls[2]},
+                ],
+            },
+            max_candidates=2,
+        )
+
+        result = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "幼女战记2", "matches": []}),
+            RecordingQas(shares=shares),
+            self.store,
+            pansou,
+        ).search("幼女战记2", "anime")
+
+        self.assertEqual(result["data"]["candidateCount"], 2)
 
     def test_missing_local_title_returns_opaque_remote_candidates(self):
         url = "https://pan.quark.cn/s/secret-share"

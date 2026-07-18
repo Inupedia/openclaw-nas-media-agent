@@ -255,6 +255,10 @@ class MediaService:
         by_share = {}
         warnings = []
         pansou_available = self.pansou is not None
+        pansou_keys = set()
+        pansou_limit = int(
+            getattr(self.pansou, "max_candidates", 50)
+        )
 
         for variant in query_variants(query):
             sources = [("qas", self.qas.search(variant, deep=True))]
@@ -271,6 +275,10 @@ class MediaService:
                     share_url = candidate.get("shareurl") or candidate.get("url")
                     normalized = normalize_quark_url(share_url)
                     key = normalized or str(share_url or "").strip()
+                    if source == "pansou" and key not in pansou_keys:
+                        if len(pansou_keys) >= pansou_limit:
+                            continue
+                        pansou_keys.add(key)
                     if not key:
                         discovered.append(
                             {
