@@ -37,6 +37,17 @@ class SkillContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.content)
 
+    def test_skill_declares_every_injected_environment_variable(self):
+        self.assertIn("metadata:", self.frontmatter)
+        for variable in (
+            "QAS_BASE_URL",
+            "QAS_TOKEN",
+            "ARIA2_RPC_URL",
+            "ARIA2_RPC_SECRET",
+            "RESOURCE_AGENT_STATE_DB",
+        ):
+            self.assertIn(variable, self.frontmatter)
+
     def test_skill_requires_terminal_stop_and_nas_first_output(self):
         self.assertIn("terminal", self.content)
         self.assertIn("stop_local_exists", self.content)
