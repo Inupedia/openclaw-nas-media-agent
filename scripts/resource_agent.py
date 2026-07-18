@@ -6,14 +6,25 @@ import sys
 from pathlib import Path
 
 from aria2_client import Aria2Client
+from library_catalog import LibraryCatalog
+from media_service import MediaService
 from output_contract import failure, success
 from planner import DownloadPlanner, PlanningError
 from qas_client import ClientError, QasClient
-from state_store import StateStore
+from state_store import PlanError, StateStore
 
 
 class AgentError(RuntimeError):
     pass
+
+
+class CliUsageError(ValueError):
+    pass
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise CliUsageError("invalid command or arguments")
 
 
 def _int(value) -> int:
@@ -221,18 +232,39 @@ def _load_runtime():
     return routing, store, qas, aria, planner
 
 
-def main(argv=None) -> int:
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    arguments = [value for value in arguments if value != "--json"]
-    parser = argparse.ArgumentParser()
+def parse_args(argv) -> argparse.Namespace:
+    parser = SafeArgumentParser(
+        prog="mediactl",
+        add_help=True,
+        argument_default=argparse.SUPPRESS,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("check-ready")
+    library = subparsers.add_parser("library")
+    library_sub = library.add_subparsers(
+        dest="library_command",
+        required=True,
+    )
+    lookup = library_sub.add_parser("lookup")
+    lookup.add_argument("query")
+    lookup.add_argument(
+        "--media-type",
+        choices=("movie", "tv", "anime", "documentary", "show", "other"),
+    )
     search = subparsers.add_parser("search")
     search.add_argument("query")
-    plan = subparsers.add_parser("plan-download")
-    plan.add_argument("query_or_url")
-    plan.add_argument("--query-hint", default="")
+    search.add_argument(
+        "--media-type",
+        choices=("movie", "tv", "anime", "documentary", "show", "other"),
+    )
+    search.add_argument("--update", action="store_true")
+    preview = subparsers.add_parser("preview")
+    preview.add_argument("candidate_id")
+    plan = subparsers.add_parser("plan")
+    plan_sub = plan.add_subparsers(dest="plan_command", required=True)
+    plan_download = plan_sub.add_parser("download")
+    plan_download.add_argument("candidate_id")
     execute = subparsers.add_parser("execute")
     execute.add_argument("plan_id")
     execute.add_argument("--confirmed", action="store_true")
@@ -245,15 +277,49 @@ def main(argv=None) -> int:
         control = downloads_sub.add_parser(command)
         control.add_argument("task_id")
 
-    args = parser.parse_args(arguments)
+    return parser.parse_args(list(argv))
+
+
+def emit(result: dict, *, stream=None) -> None:
+    stream = sys.stdout if stream is None else stream
+    stream.write(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
+def _default_service_factory(routing, store, qas):
+    roots = {
+        media_type: Path(route["final_root"])
+        for media_type, route in routing.items()
+        if isinstance(route, dict) and route.get("final_root")
+    }
+    return MediaService(LibraryCatalog(roots), qas, store)
+
+
+def main(
+    argv=None,
+    *,
+    runtime_loader=_load_runtime,
+    service_factory=_default_service_factory,
+    stream=None,
+) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
     store = None
     try:
-        routing, store, qas, aria, planner = _load_runtime()
+        args = parse_args(arguments)
+        routing, store, qas, aria, planner = runtime_loader()
         agent = ResourceAgent(store=store, qas=qas, aria=aria)
+        service = service_factory(routing, store, qas)
         if args.command == "check-ready":
             roots = [
                 Path(route["staging_root"])
                 for route in routing.values()
+                if isinstance(route, dict) and route.get("staging_root")
             ]
             unique_roots = list(dict.fromkeys(roots))
             ready = agent.check_ready(unique_roots)
@@ -268,17 +334,28 @@ def main(argv=None) -> int:
                     ready.get("error", "runtime is not ready"),
                     next_action=ready.get("nextAction", "review_error"),
                 )
-        elif args.command == "search":
+        elif args.command == "library":
             result = success(
-                {"candidates": qas.search(args.query)},
-                next_action="choose_candidate",
+                {
+                    "local": service.catalog.lookup(
+                        args.query,
+                        getattr(args, "media_type", None),
+                    )
+                },
+                terminal=True,
+                next_action="local_lookup_complete",
             )
-        elif args.command == "plan-download":
+        elif args.command == "search":
+            result = service.search(
+                args.query,
+                getattr(args, "media_type", None),
+                update=getattr(args, "update", False),
+            )
+        elif args.command == "preview":
+            result = service.preview(args.candidate_id)
+        elif args.command == "plan":
             result = success(
-                planner.plan(
-                    args.query_or_url,
-                    query_hint=args.query_hint,
-                ),
+                planner.plan_selected(args.candidate_id),
                 next_action="review_plan",
             )
         elif args.command == "execute":
@@ -307,13 +384,21 @@ def main(argv=None) -> int:
                 ),
                 next_action="none",
             )
-    except (AgentError, ClientError, PlanningError) as error:
+    except CliUsageError as error:
         result = failure(
-            {
-                AgentError: "AGENT_ERROR",
-                ClientError: "CLIENT_ERROR",
-                PlanningError: "PLANNING_ERROR",
-            }.get(type(error), "AGENT_ERROR"),
+            "INVALID_COMMAND",
+            str(error),
+            next_action="use_mediactl_help",
+        )
+    except (AgentError, ClientError, PlanningError, PlanError) as error:
+        result = failure(
+            (
+                "CLIENT_ERROR"
+                if isinstance(error, ClientError)
+                else "PLANNING_ERROR"
+                if isinstance(error, (PlanningError, PlanError))
+                else "AGENT_ERROR"
+            ),
             str(error),
             next_action="review_error",
         )
@@ -321,7 +406,7 @@ def main(argv=None) -> int:
         if store is not None:
             store.close()
 
-    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    emit(result, stream=stream)
     return 0 if result.get("ok") else 1
 
 
