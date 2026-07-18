@@ -88,7 +88,17 @@ def classify(query: str, share: dict) -> Classification:
             media_type = "other"
             reasons.append("ambiguous_collection")
 
-    if len(names) > 1 and not episodes and media_type in {"movie", "other"}:
+    video_count = sum(
+        name.lower().endswith(VIDEO_EXTENSIONS) for name in names
+    )
+    collection_hint = any(
+        token in lower for token in ("合集", "花絮", "多个版本", "多版本")
+    )
+    if (
+        (video_count > 1 or collection_hint)
+        and not episodes
+        and media_type in {"movie", "other"}
+    ):
         if "ambiguous_collection" not in reasons:
             reasons.append("ambiguous_collection")
 
