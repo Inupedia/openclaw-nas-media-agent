@@ -3,6 +3,7 @@ import re
 import uuid
 from typing import Callable
 
+from episode_diff import normalize_title_key
 from media_classifier import classify, score_candidate
 from media_namer import build_paths
 from qas_client import ClientError
@@ -163,21 +164,144 @@ class DownloadPlanner:
         plan_id = self.store.create_plan("download", plan_payload)
         return {"planId": plan_id, **plan_payload}
 
+    def plan_selected(self, candidate_id: str) -> dict:
+        try:
+            candidate = self.store.get_candidate(candidate_id)
+        except PlanError as error:
+            raise PlanningError(str(error)) from None
+        details = candidate.get("details")
+        if not isinstance(details, dict):
+            raise PlanningError("candidate must be previewed before planning")
+
+        query = str(candidate.get("query", ""))
+        classification = classify(query, details)
+        task_id = f"rd-{uuid.uuid4().hex[:12]}"
+        paths = build_paths(classification, self.routing, task_id)
+        selected_files = list(candidate.get("selectedFiles", []))
+        if not selected_files:
+            allowed_extensions = (
+                ".mkv",
+                ".mp4",
+                ".avi",
+                ".mov",
+                ".m4v",
+                ".ts",
+                ".ass",
+                ".ssa",
+                ".srt",
+                ".vtt",
+            )
+            selected_files = [
+                str(item.get("file_name", ""))
+                for item in details.get("list", [])
+                if not item.get("dir")
+                and str(item.get("file_name", "")).lower().endswith(
+                    allowed_extensions
+                )
+            ]
+        selected_files = sorted(
+            {name for name in selected_files if name},
+            key=str.casefold,
+        )
+        if not selected_files:
+            raise PlanningError("candidate has no selectable media files")
+
+        warnings = []
+        if classification.confidence < 0.85:
+            warnings.append("classification_low_confidence")
+        if self.path_exists(paths["final_path"]):
+            warnings.append("final_path_exists")
+        pattern = "(?i)^(?:" + "|".join(
+            re.escape(name) for name in selected_files
+        ) + ")$"
+        task = {
+            "taskname": classification.title,
+            "shareurl": candidate["shareurl"],
+            "savepath": paths["cloud_path"],
+            "pattern": pattern,
+            "replace": "",
+            "runweek": [1, 2, 3, 4, 5, 6, 7],
+            "addition": {
+                "aria2": {
+                    "auto_download": True,
+                    "download_subdir": True,
+                    "save_path": paths["aria2_save_path"],
+                    "pause": False,
+                }
+            },
+        }
+        incremental = {
+            "existingEpisodes": list(candidate.get("existingEpisodes", [])),
+            "newEpisodes": list(candidate.get("newEpisodes", [])),
+            "selectedFiles": selected_files,
+        }
+        classification_data = {
+            "mediaType": classification.media_type,
+            "title": classification.title,
+            "year": classification.year,
+            "season": classification.season,
+            "episodes": classification.episodes,
+            "confidence": classification.confidence,
+            "reasons": classification.reasons,
+        }
+        title_key = str(
+            candidate.get("titleKey")
+            or normalize_title_key(classification.title)
+        )
+        plan_payload = {
+            "schemaVersion": 1,
+            "taskId": task_id,
+            "titleKey": title_key,
+            "action": "download",
+            "candidateId": candidate_id,
+            "classification": classification_data,
+            "cloudPath": paths["cloud_path"],
+            "stagingPath": paths["staging_path"],
+            "finalPath": paths["final_path"],
+            "incremental": incremental,
+            "task": task,
+            "warnings": warnings,
+            "requiresConfirmation": bool(warnings),
+        }
+        plan_id = self.store.create_plan("download", plan_payload)
+        return {
+            "planId": plan_id,
+            "taskId": task_id,
+            "action": "download",
+            "classification": classification_data,
+            "stagingPath": paths["staging_path"],
+            "finalPath": paths["final_path"],
+            "incremental": incremental,
+            "warnings": warnings,
+            "requiresConfirmation": bool(warnings),
+        }
+
     def execute(self, plan_id: str, *, confirmed: bool = False) -> dict:
         try:
-            plan = self.store.consume_plan(plan_id, "download")
+            plan = self.store.read_plan(plan_id, "download")
         except PlanError as error:
             raise PlanningError(str(error)) from None
         if plan["requiresConfirmation"] and not confirmed:
             raise PlanningError("download plan requires confirmation")
+        try:
+            plan = self.store.consume_plan(plan_id, "download")
+        except PlanError as error:
+            raise PlanningError(str(error)) from None
 
         classification = plan["classification"]
         task_record = {
             "task_id": plan["taskId"],
             "title": classification["title"],
+            "title_key": plan.get(
+                "titleKey",
+                normalize_title_key(classification["title"]),
+            ),
             "media_type": classification["mediaType"],
             "qas_task_name": plan["task"]["taskname"],
             "aria2_gids": [],
+            "episode_keys": list(
+                plan.get("incremental", {}).get("newEpisodes", [])
+            ),
             "aria2_dir": f"/nas/{plan['task']['addition']['aria2']['save_path']}",
             "staging_path": plan["stagingPath"],
             "final_path": plan["finalPath"],
@@ -194,7 +318,6 @@ class DownloadPlanner:
                 "taskId": plan["taskId"],
                 "status": "submitted",
                 "action": plan["action"],
-                "qas": result,
             }
         except Exception as error:
             task_record["status"] = "failed"

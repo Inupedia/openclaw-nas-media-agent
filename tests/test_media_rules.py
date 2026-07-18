@@ -6,7 +6,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from media_classifier import classify, score_candidate
+from media_classifier import classify, extract_candidate_spec, score_candidate
 from media_namer import build_paths, normalize_title
 
 
@@ -35,13 +35,13 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(result.year, 2024)
         self.assertGreaterEqual(result.confidence, 0.85)
 
-    def test_sxxexx_is_tv(self):
+    def test_sxxexx_is_drama(self):
         result = classify(
             "黑镜 第二季",
             share("Black.Mirror.S02E03.1080p.mkv"),
         )
 
-        self.assertEqual(result.media_type, "tv")
+        self.assertEqual(result.media_type, "drama")
         self.assertEqual(result.season, 2)
         self.assertEqual(result.episodes, [3])
 
@@ -61,7 +61,7 @@ class ClassificationTests(unittest.TestCase):
             share("某剧.S00E01.特别篇.mkv"),
         )
 
-        self.assertEqual(result.media_type, "tv")
+        self.assertEqual(result.media_type, "drama")
         self.assertEqual(result.season, 0)
         self.assertEqual(result.episodes, [1])
 
@@ -83,6 +83,18 @@ class NamingTests(unittest.TestCase):
         ) as routing_file:
             self.routing = json.load(routing_file)
 
+    def test_drama_uses_the_existing_tv_route(self):
+        for key in (
+            "cloud_prefix",
+            "aria2_prefix",
+            "staging_root",
+            "final_root",
+        ):
+            self.assertEqual(
+                self.routing["drama"][key],
+                self.routing["tv"][key],
+            )
+
     def test_title_normalization_removes_ads_and_technical_tags(self):
         normalized = normalize_title(
             "【XX电影网】黑镜.S02E03.1080P.HEVC.www.example.com.mkv"
@@ -90,7 +102,7 @@ class NamingTests(unittest.TestCase):
 
         self.assertEqual(normalized, "黑镜")
 
-    def test_movie_paths_follow_volume_three_rule(self):
+    def test_movie_uses_unified_download_area_then_volume_three_final(self):
         classification = classify(
             "沙丘2 2024",
             share("沙丘2.2024.1080P.mkv"),
@@ -100,7 +112,7 @@ class NamingTests(unittest.TestCase):
 
         self.assertEqual(
             paths["staging_path"],
-            "/volume3/临时影视/.incoming/rd-123",
+            "/volume2/downloads/.incoming/rd-123",
         )
         self.assertEqual(
             paths["final_path"],
@@ -108,7 +120,7 @@ class NamingTests(unittest.TestCase):
         )
         self.assertEqual(
             paths["aria2_save_path"],
-            "临时影视/.incoming/rd-123",
+            "downloads/.incoming/rd-123",
         )
 
 
@@ -137,6 +149,49 @@ class CandidateScoreTests(unittest.TestCase):
         self.assertLess(result.score, 70)
         self.assertIn("cam", result.penalties)
         self.assertIn("archive_only", result.penalties)
+
+
+class CandidateSpecificationTests(unittest.TestCase):
+    def test_extracts_quality_size_and_bilingual_external_subtitles(self):
+        details = {
+            "list": [
+                {
+                    "file_name": (
+                        "Example.S01E01.2160p.DV.HDR.HEVC.Atmos.mkv"
+                    ),
+                    "size": 8_000_000_000,
+                },
+                {
+                    "file_name": "Example.S01E01.chs-eng.ass",
+                    "size": 50_000,
+                },
+            ]
+        }
+
+        result = extract_candidate_spec(details)
+
+        self.assertEqual(result["resolution"], "2160p")
+        self.assertEqual(result["dynamicRange"], "dolby_vision")
+        self.assertEqual(result["videoCodec"], "hevc")
+        self.assertEqual(result["audioFormat"], "atmos")
+        self.assertEqual(result["subtitleClass"], "zh_en")
+        self.assertEqual(result["subtitleForm"], "external")
+        self.assertEqual(result["totalBytes"], 8_000_050_000)
+        self.assertEqual(result["fileCount"], 2)
+        self.assertEqual(
+            result["episodeCoverage"],
+            [{"season": 1, "episode": 1}],
+        )
+
+    def test_unknown_metadata_is_reported_not_invented(self):
+        result = extract_candidate_spec(
+            {"list": [{"file_name": "video.mkv", "size": 100}]}
+        )
+
+        self.assertEqual(result["resolution"], "unknown")
+        self.assertEqual(result["dynamicRange"], "unknown")
+        self.assertEqual(result["subtitleClass"], "unknown")
+        self.assertEqual(result["subtitleForm"], "unknown")
 
 
 if __name__ == "__main__":

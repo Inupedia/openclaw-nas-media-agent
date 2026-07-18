@@ -2,17 +2,33 @@
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 from aria2_client import Aria2Client
+from library_catalog import LibraryCatalog
+from media_service import MediaService
+from organizer import DownloadValidator, OrganizeError, Organizer
+from output_contract import failure, success
+from path_guard import PathGuard
 from planner import DownloadPlanner, PlanningError
 from qas_client import ClientError, QasClient
-from state_store import StateStore
+from state_store import PlanError, StateStore
 
 
 class AgentError(RuntimeError):
     pass
+
+
+class CliUsageError(ValueError):
+    pass
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise CliUsageError("invalid command or arguments")
 
 
 def _int(value) -> int:
@@ -220,18 +236,39 @@ def _load_runtime():
     return routing, store, qas, aria, planner
 
 
-def main(argv=None) -> int:
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    arguments = [value for value in arguments if value != "--json"]
-    parser = argparse.ArgumentParser()
+def parse_args(argv) -> argparse.Namespace:
+    parser = SafeArgumentParser(
+        prog="mediactl",
+        add_help=True,
+        argument_default=argparse.SUPPRESS,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("check-ready")
+    library = subparsers.add_parser("library")
+    library_sub = library.add_subparsers(
+        dest="library_command",
+        required=True,
+    )
+    lookup = library_sub.add_parser("lookup")
+    lookup.add_argument("query")
+    lookup.add_argument(
+        "--media-type",
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
+    )
     search = subparsers.add_parser("search")
     search.add_argument("query")
-    plan = subparsers.add_parser("plan-download")
-    plan.add_argument("query_or_url")
-    plan.add_argument("--query-hint", default="")
+    search.add_argument(
+        "--media-type",
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
+    )
+    search.add_argument("--update", action="store_true")
+    preview = subparsers.add_parser("preview")
+    preview.add_argument("candidate_id")
+    plan = subparsers.add_parser("plan")
+    plan_sub = plan.add_subparsers(dest="plan_command", required=True)
+    plan_download = plan_sub.add_parser("download")
+    plan_download.add_argument("candidate_id")
     execute = subparsers.add_parser("execute")
     execute.add_argument("plan_id")
     execute.add_argument("--confirmed", action="store_true")
@@ -240,64 +277,246 @@ def main(argv=None) -> int:
     downloads_sub.add_parser("list")
     show = downloads_sub.add_parser("show")
     show.add_argument("task_id")
+    validate = downloads_sub.add_parser("validate")
+    validate.add_argument("task_id")
     for command in ("pause", "resume", "cancel"):
         control = downloads_sub.add_parser(command)
         control.add_argument("task_id")
+    organize = subparsers.add_parser("organize")
+    organize_sub = organize.add_subparsers(
+        dest="organize_command",
+        required=True,
+    )
+    organize_plan = organize_sub.add_parser("plan")
+    organize_plan.add_argument("task_id")
+    organize_execute = organize_sub.add_parser("execute")
+    organize_execute.add_argument("plan_id")
+    organize_execute.add_argument("--confirmed", action="store_true")
 
-    args = parser.parse_args(arguments)
+    return parser.parse_args(list(argv))
+
+
+def emit(result: dict, *, stream=None) -> None:
+    stream = sys.stdout if stream is None else stream
+    stream.write(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
+def _default_service_factory(routing, store, qas):
+    roots = {
+        media_type: Path(route["final_root"])
+        for media_type, route in routing.items()
+        if isinstance(route, dict) and route.get("final_root")
+    }
+    return MediaService(LibraryCatalog(roots), qas, store)
+
+
+def _ffprobe_runner(path: Path) -> bool:
+    binary = shutil.which("ffprobe")
+    if not binary:
+        return True
+    completed = subprocess.run(
+        [
+            binary,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            "--",
+            str(path),
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    return completed.returncode == 0
+
+
+def _default_organizer_factory(routing, store):
+    downloads_root = Path(routing["downloads"]["root"])
+    protected_roots = [
+        Path("/volume2/影视"),
+        Path("/volume3/临时影视"),
+    ]
+    roots = [
+        downloads_root,
+        *protected_roots,
+        *[
+            Path(route["final_root"])
+            for route in routing.values()
+            if isinstance(route, dict) and route.get("final_root")
+        ],
+    ]
+    guard = PathGuard(
+        roots,
+        protected_roots=protected_roots,
+    )
+    validator = DownloadValidator(
+        store,
+        guard,
+        downloads_root,
+        ffprobe_runner=_ffprobe_runner,
+    )
+    return Organizer(
+        store,
+        guard,
+        downloads_root,
+        validator=validator,
+    )
+
+
+def main(
+    argv=None,
+    *,
+    runtime_loader=_load_runtime,
+    service_factory=_default_service_factory,
+    organizer_factory=_default_organizer_factory,
+    stream=None,
+) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
     store = None
     try:
-        routing, store, qas, aria, planner = _load_runtime()
+        args = parse_args(arguments)
+        routing, store, qas, aria, planner = runtime_loader()
         agent = ResourceAgent(store=store, qas=qas, aria=aria)
+        service = service_factory(routing, store, qas)
         if args.command == "check-ready":
             roots = [
                 Path(route["staging_root"])
                 for route in routing.values()
+                if isinstance(route, dict) and route.get("staging_root")
             ]
             unique_roots = list(dict.fromkeys(roots))
-            result = agent.check_ready(unique_roots)
+            ready = agent.check_ready(unique_roots)
+            if ready.get("ok"):
+                result = success(
+                    ready.get("data"),
+                    next_action=ready.get("nextAction", "ready"),
+                )
+            else:
+                result = failure(
+                    "NOT_READY",
+                    ready.get("error", "runtime is not ready"),
+                    next_action=ready.get("nextAction", "review_error"),
+                )
+        elif args.command == "library":
+            result = success(
+                {
+                    "local": service.catalog.lookup(
+                        args.query,
+                        getattr(args, "media_type", None),
+                    )
+                },
+                terminal=True,
+                next_action="local_lookup_complete",
+            )
         elif args.command == "search":
-            result = {"ok": True, "data": {"candidates": qas.search(args.query)}}
-        elif args.command == "plan-download":
-            result = {
-                "ok": True,
-                "data": planner.plan(
-                    args.query_or_url,
-                    query_hint=args.query_hint,
-                ),
-            }
+            result = service.search(
+                args.query,
+                getattr(args, "media_type", None),
+                update=getattr(args, "update", False),
+            )
+        elif args.command == "preview":
+            result = service.preview(args.candidate_id)
+        elif args.command == "plan":
+            result = success(
+                planner.plan_selected(args.candidate_id),
+                next_action="review_plan",
+            )
         elif args.command == "execute":
-            result = {
-                "ok": True,
-                "data": planner.execute(
+            result = success(
+                planner.execute(
                     args.plan_id,
                     confirmed=args.confirmed,
                 ),
-            }
+                next_action="monitor_download",
+            )
+        elif args.command == "organize":
+            organizer = organizer_factory(routing, store)
+            if args.organize_command == "plan":
+                result = success(
+                    organizer.plan(args.task_id),
+                    next_action="review_organize_plan",
+                )
+            else:
+                result = success(
+                    organizer.execute(
+                        args.plan_id,
+                        confirmed=getattr(args, "confirmed", False),
+                    ),
+                    next_action="none",
+                )
         elif args.download_command == "list":
-            result = {"ok": True, "data": agent.downloads_list()}
+            result = success(
+                agent.downloads_list(),
+                next_action="none",
+            )
         elif args.download_command == "show":
-            result = {"ok": True, "data": agent.downloads_show(args.task_id)}
+            result = success(
+                agent.downloads_show(args.task_id),
+                next_action="none",
+            )
+        elif args.download_command == "validate":
+            organizer = organizer_factory(routing, store)
+            report = organizer.validator.validate(args.task_id)
+            result = success(
+                {
+                    "taskId": args.task_id,
+                    "valid": report.ok,
+                    "problems": list(report.problems),
+                    "fileCount": len(report.manifest),
+                    "totalBytes": sum(report.manifest.values()),
+                },
+                terminal=True,
+                next_action=report.next_action,
+            )
         else:
-            result = {
-                "ok": True,
-                "data": agent.downloads_control(
+            result = success(
+                agent.downloads_control(
                     args.task_id,
                     args.download_command,
                 ),
-            }
-    except (AgentError, ClientError, PlanningError) as error:
-        result = {
-            "ok": False,
-            "data": None,
-            "error": str(error),
-            "nextAction": "review_error",
-        }
+                next_action="none",
+            )
+    except CliUsageError as error:
+        result = failure(
+            "INVALID_COMMAND",
+            str(error),
+            next_action="use_mediactl_help",
+        )
+    except (
+        AgentError,
+        ClientError,
+        OrganizeError,
+        PlanningError,
+        PlanError,
+    ) as error:
+        result = failure(
+            (
+                "CLIENT_ERROR"
+                if isinstance(error, ClientError)
+                else "ORGANIZE_ERROR"
+                if isinstance(error, OrganizeError)
+                else "PLANNING_ERROR"
+                if isinstance(error, (PlanningError, PlanError))
+                else "AGENT_ERROR"
+            ),
+            str(error),
+            next_action="review_error",
+        )
     finally:
         if store is not None:
             store.close()
 
-    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    emit(result, stream=stream)
     return 0 if result.get("ok") else 1
 
 

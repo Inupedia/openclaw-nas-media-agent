@@ -62,6 +62,17 @@ class StateStoreTests(unittest.TestCase):
             "Test",
         )
 
+    def test_modified_plan_payload_is_rejected(self):
+        plan_id = self.store.create_plan("download", {"title": "Safe"})
+        self.store.connection.execute(
+            "UPDATE plans SET payload_json = ? WHERE plan_id = ?",
+            ('{"title":"Changed"}', plan_id),
+        )
+        self.store.connection.commit()
+
+        with self.assertRaisesRegex(PlanError, "integrity"):
+            self.store.consume_plan(plan_id, "download")
+
     def test_task_persistence_uses_an_allowlist(self):
         self.store.upsert_task(
             {
@@ -83,6 +94,68 @@ class StateStoreTests(unittest.TestCase):
         self.assertNotIn("must-not-persist", serialized)
         self.assertNotIn("cookie", serialized)
         self.assertNotIn("secret", serialized)
+
+    def test_candidate_is_opaque_and_expires(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Example",
+                "shareurl": "https://pan.quark.cn/s/example",
+            },
+            ttl_seconds=10,
+        )
+
+        self.assertTrue(candidate_id.startswith("candidate-"))
+        self.assertEqual(
+            self.store.get_candidate(candidate_id)["query"],
+            "Example",
+        )
+        self.clock.now += 11
+        with self.assertRaisesRegex(PlanError, "candidate expired"):
+            self.store.get_candidate(candidate_id)
+
+    def test_candidate_can_be_updated_with_preview_details(self):
+        candidate_id = self.store.create_candidate(
+            {"query": "Example"},
+        )
+
+        self.store.update_candidate(
+            candidate_id,
+            {"query": "Example", "details": {"list": []}},
+        )
+
+        self.assertEqual(
+            self.store.get_candidate(candidate_id)["details"],
+            {"list": []},
+        )
+
+    def test_pending_episode_refs_include_unconsumed_plans_and_active_tasks(self):
+        self.store.create_plan(
+            "download",
+            {
+                "titleKey": "show",
+                "incremental": {
+                    "newEpisodes": [{"season": 1, "episode": 4}],
+                },
+            },
+        )
+        self.store.upsert_task(
+            {
+                "task_id": "rd-show",
+                "title": "Show",
+                "title_key": "show",
+                "media_type": "tv",
+                "aria2_gids": ["abc"],
+                "episode_keys": [{"season": 1, "episode": 3}],
+                "staging_path": "/volume2/downloads/.incoming/rd-show",
+                "final_path": "/volume2/影视/Drama/Show",
+                "status": "active",
+            }
+        )
+
+        self.assertEqual(
+            self.store.pending_episode_refs("show"),
+            {(1, 3, None), (1, 4, None)},
+        )
 
 
 if __name__ == "__main__":
