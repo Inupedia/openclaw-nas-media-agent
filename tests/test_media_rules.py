@@ -193,6 +193,28 @@ class CandidateSpecificationTests(unittest.TestCase):
         self.assertEqual(result["subtitleClass"], "unknown")
         self.assertEqual(result["subtitleForm"], "unknown")
 
+    def test_share_meta_totals_and_sample_name_drive_spec(self):
+        result = extract_candidate_spec(
+            {
+                "share": {
+                    "title": "犯罪心理S01~S16",
+                    "size": 202848184964,
+                    "file_only_num": 327,
+                },
+                "list": [
+                    {
+                        "file_name": "犯罪心理.S01E01.1080P.mkv",
+                        "dir": False,
+                        "size": 1,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result["resolution"], "1080p")
+        self.assertEqual(result["totalBytes"], 202848184964)
+        self.assertEqual(result["videoFileCount"], 327)
+
 
 if __name__ == "__main__":
     unittest.main()

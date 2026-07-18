@@ -195,16 +195,38 @@ def score_candidate(
     )
 
 
+def _share_meta(share: dict) -> dict:
+    meta = share.get("share")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _first_file_name(share_meta: dict) -> str:
+    first = share_meta.get("first_file")
+    if isinstance(first, dict):
+        return str(first.get("file_name") or first.get("name") or "")
+    if isinstance(first, str):
+        return first
+    return ""
+
+
+def _positive_int(value) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def extract_candidate_spec(share: dict) -> dict:
+    share_meta = _share_meta(share)
     items = [
         item
         for item in _files(share)
         if not item.get("dir") and item.get("file_name")
     ]
     names = [str(item.get("file_name", "")) for item in items]
-    title = str(share.get("share", {}).get("title", ""))
-    text = " ".join([title, *names])
-    lower = text.casefold()
+    title = str(share_meta.get("title", ""))
+    first_name = _first_file_name(share_meta)
+    text = " ".join([title, first_name, *names])
 
     resolution = "unknown"
     for value, pattern in (
@@ -304,12 +326,17 @@ def extract_candidate_spec(share: dict) -> dict:
         {"season": season, "episode": episode}
         for season, episode in sorted(episode_pairs)
     ]
-    total_bytes = 0
+    listed_bytes = 0
     for item in items:
-        try:
-            total_bytes += max(0, int(item.get("size") or 0))
-        except (TypeError, ValueError):
-            continue
+        listed_bytes += _positive_int(item.get("size"))
+    meta_bytes = _positive_int(share_meta.get("size"))
+    total_bytes = max(listed_bytes, meta_bytes)
+
+    listed_videos = len(video_names)
+    meta_videos = _positive_int(share_meta.get("video_total"))
+    meta_files = _positive_int(share_meta.get("file_only_num"))
+    video_file_count = max(listed_videos, meta_videos, meta_files)
+    file_count = max(len(items), meta_files, video_file_count)
 
     group_key = "|".join(
         (
@@ -332,8 +359,8 @@ def extract_candidate_spec(share: dict) -> dict:
         "subtitleClass": subtitle_class,
         "subtitleForm": subtitle_form,
         "totalBytes": total_bytes,
-        "fileCount": len(items),
-        "videoFileCount": len(video_names),
+        "fileCount": file_count,
+        "videoFileCount": video_file_count,
         "episodeCoverage": episode_coverage,
         "groupKey": group_key,
     }

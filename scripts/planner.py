@@ -44,7 +44,7 @@ class DownloadPlanner:
             if not share_url:
                 continue
             try:
-                details = self.qas.get_share_expanded(share_url)
+                details = self.qas.get_share_preview(share_url)
             except ClientError:
                 continue
             score = score_candidate(query, candidate, details)
@@ -67,7 +67,7 @@ class DownloadPlanner:
         hint = _clean_hint(query_hint or query_or_url)
         if direct_match:
             share_url = direct_match.group(0)
-            details = self.qas.get_share_expanded(share_url)
+            details = self.qas.get_share_preview(share_url)
             candidate = {
                 "taskname": details.get("share", {}).get("title", hint),
                 "content": " ".join(

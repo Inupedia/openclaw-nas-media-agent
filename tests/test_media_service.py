@@ -41,8 +41,8 @@ class RecordingQas:
             raise result
         return result
 
-    def get_share_expanded(self, url, **kwargs):
-        self.reads.append(("share_expanded", url))
+    def get_share_preview(self, url, **kwargs):
+        self.reads.append(("share_preview", url))
         return self.get_share(url, show_all=True)
 
     def add_task(self, task):

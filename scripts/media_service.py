@@ -53,7 +53,7 @@ class MediaService:
                 self._count_rejection(rejected, "missing_share")
                 continue
             try:
-                details = self.qas.get_share_expanded(share_url)
+                details = self.qas.get_share_preview(share_url)
             except ClientError:
                 self._count_rejection(rejected, "expired_or_unavailable")
                 continue
@@ -63,10 +63,21 @@ class MediaService:
                 for item in items
                 if item.get("file_name") and not item.get("dir")
             ]
-            if not names:
+            share_meta = details.get("share") if isinstance(details.get("share"), dict) else {}
+            has_share_files = (
+                int(share_meta.get("file_only_num") or 0) > 0
+                or int(share_meta.get("video_total") or 0) > 0
+                or int(share_meta.get("all_file_num") or 0) > 0
+                or any(
+                    item.get("dir") and int(item.get("include_items") or 0) > 0
+                    for item in items
+                    if isinstance(item, dict)
+                )
+            )
+            if not names and not has_share_files:
                 self._count_rejection(rejected, "empty")
                 continue
-            if all(name.casefold().endswith(ARCHIVE_EXTENSIONS) for name in names):
+            if names and all(name.casefold().endswith(ARCHIVE_EXTENSIONS) for name in names):
                 self._count_rejection(rejected, "archive_only")
                 continue
             specification = extract_candidate_spec(details)
@@ -146,7 +157,7 @@ class MediaService:
             share_url = candidate.get("shareurl") or candidate.get("url")
             if not share_url:
                 continue
-            details = self.qas.get_share_expanded(share_url)
+            details = self.qas.get_share_preview(share_url)
             items = list(details.get("list", []) or [])
             remote_keys = {
                 key
@@ -398,7 +409,7 @@ class MediaService:
 
     def preview(self, candidate_id: str) -> dict:
         candidate = self.store.get_candidate(candidate_id)
-        details = self.qas.get_share_expanded(candidate["shareurl"])
+        details = self.qas.get_share_preview(candidate["shareurl"])
         candidate = dict(candidate)
         candidate["details"] = details
         self.store.update_candidate(candidate_id, candidate)
@@ -412,6 +423,17 @@ class MediaService:
                     "size": int(item.get("size") or 0),
                 }
             )
+        share_meta = details.get("share") if isinstance(details.get("share"), dict) else {}
+        listed_files = [
+            item
+            for item in list(details.get("list", []) or [])
+            if not item.get("dir")
+        ]
+        file_count = max(
+            len(listed_files),
+            int(share_meta.get("file_only_num") or 0),
+            int(share_meta.get("video_total") or 0),
+        )
         return success(
             {
                 "candidateId": candidate_id,
@@ -421,13 +443,8 @@ class MediaService:
                     or "未命名候选"
                 ),
                 "files": files,
-                "fileCount": len(
-                    [
-                        item
-                        for item in list(details.get("list", []) or [])
-                        if not item.get("dir")
-                    ]
-                ),
+                "fileCount": file_count,
+                "totalBytes": int(share_meta.get("size") or 0),
             },
             terminal=False,
             next_action="plan_or_choose",

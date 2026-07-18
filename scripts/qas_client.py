@@ -1,8 +1,8 @@
 import json
+import random
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import deque
 from typing import Callable
 
 
@@ -10,10 +10,9 @@ class ClientError(RuntimeError):
     pass
 
 
-DEFAULT_BFS_MAX_DEPTH = 8
-DEFAULT_BFS_MAX_DIRECTORIES = 64
-DEFAULT_BFS_MAX_FILES = 500
-DEFAULT_BFS_MAX_REQUESTS = 80
+DEFAULT_SAMPLE_MAX_DEPTH = 4
+DEFAULT_SAMPLE_MAX_REQUESTS = 4
+VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")
 
 
 def share_url_for_directory(share_url: str, pdir_fid: str) -> str:
@@ -23,6 +22,11 @@ def share_url_for_directory(share_url: str, pdir_fid: str) -> str:
     if not base or not fid:
         return str(share_url or "")
     return f"{base}#/list/share/{fid}"
+
+
+def _is_video_item(item: dict) -> bool:
+    name = str(item.get("file_name") or "").casefold()
+    return bool(name) and name.endswith(VIDEO_EXTENSIONS)
 
 
 class QasClient:
@@ -129,95 +133,106 @@ class QasClient:
             data["list"] = list(data.get("list", []))[:10]
         return data
 
-    def get_share_expanded(
+    def get_share_preview(
         self,
         share_url: str,
         *,
-        max_depth: int = DEFAULT_BFS_MAX_DEPTH,
-        max_directories: int = DEFAULT_BFS_MAX_DIRECTORIES,
-        max_files: int = DEFAULT_BFS_MAX_FILES,
-        max_requests: int = DEFAULT_BFS_MAX_REQUESTS,
+        max_depth: int = DEFAULT_SAMPLE_MAX_DEPTH,
+        max_requests: int = DEFAULT_SAMPLE_MAX_REQUESTS,
+        rng: random.Random | None = None,
     ) -> dict:
-        """Load a share and BFS into nested folders until files or caps are hit."""
+        """Root metadata plus a single random folder walk for sample filenames."""
         root = self.get_share(share_url, show_all=True)
         if not isinstance(root, dict):
             return {"list": []}
 
-        root_items = list(root.get("list") or [])
-        files: list[dict] = []
-        directories: list[dict] = []
-        for item in root_items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("dir"):
-                directories.append(item)
-            elif item.get("file_name"):
-                files.append(item)
+        picker = rng or random.Random()
+        root_items = [item for item in list(root.get("list") or []) if isinstance(item, dict)]
+        root_files = [
+            item
+            for item in root_items
+            if item.get("file_name") and not item.get("dir")
+        ]
+        root_dirs = [
+            item for item in root_items if item.get("dir") and item.get("fid")
+        ]
 
-        # Flat file shares need no traversal.
-        if files and not directories:
-            return root
-
-        stoken = root.get("stoken")
-        visited: set[str] = set()
-        queue: deque[tuple[str, int]] = deque()
-        for item in directories:
-            fid = str(item.get("fid") or "").strip()
-            if fid:
-                queue.append((fid, 1))
-
+        sample_files: list[dict] = []
         requests_used = 1
-        directories_seen = 0
-        while queue and directories_seen < max_directories and requests_used < max_requests:
-            if len(files) >= max_files:
+        hops = 0
+        stoken = root.get("stoken") if isinstance(root.get("stoken"), str) else None
+
+        # Root already has videos, or no folders to sample.
+        if any(_is_video_item(item) for item in root_files) or not root_dirs:
+            previewed = dict(root)
+            previewed["preview"] = {
+                "mode": "root",
+                "requests": requests_used,
+                "hops": 0,
+                "sampleFiles": 0,
+            }
+            return previewed
+
+        current_dirs = root_dirs
+        while (
+            current_dirs
+            and hops < max_depth
+            and requests_used < max_requests
+            and not any(_is_video_item(item) for item in sample_files)
+        ):
+            chosen = picker.choice(current_dirs)
+            fid = str(chosen.get("fid") or "").strip()
+            if not fid:
                 break
-            fid, depth = queue.popleft()
-            if not fid or fid in visited:
-                continue
-            visited.add(fid)
-            directories_seen += 1
-            if depth > max_depth:
-                continue
             try:
                 page = self.get_share(
                     share_url,
                     show_all=True,
-                    stoken=stoken if isinstance(stoken, str) else None,
+                    stoken=stoken,
                     pdir_fid=fid,
                 )
             except ClientError:
-                continue
+                break
             requests_used += 1
-            if isinstance(page, dict) and page.get("stoken") and not stoken:
+            hops += 1
+            if isinstance(page, dict) and isinstance(page.get("stoken"), str) and not stoken:
                 stoken = page.get("stoken")
-            for item in list((page or {}).get("list") or []):
-                if not isinstance(item, dict) or not item.get("file_name"):
-                    continue
-                if item.get("dir"):
-                    child_fid = str(item.get("fid") or "").strip()
-                    if (
-                        child_fid
-                        and child_fid not in visited
-                        and depth < max_depth
-                        and directories_seen + len(queue) < max_directories
-                    ):
-                        queue.append((child_fid, depth + 1))
-                else:
-                    files.append(item)
-                    if len(files) >= max_files:
-                        break
+            page_items = [
+                item
+                for item in list((page or {}).get("list") or [])
+                if isinstance(item, dict) and item.get("file_name")
+            ]
+            page_files = [item for item in page_items if not item.get("dir")]
+            page_dirs = [item for item in page_items if item.get("dir") and item.get("fid")]
+            sample_files.extend(page_files)
+            if any(_is_video_item(item) for item in page_files):
+                break
+            current_dirs = page_dirs
 
-        expanded = dict(root)
-        # Prefer discovered files for ranking/specs; keep root dirs for context.
-        expanded["list"] = [*files, *directories] if files else root_items
-        expanded["expanded"] = True
-        expanded["expansion"] = {
-            "requests": requests_used,
-            "directories": directories_seen,
-            "files": len(files),
-            "truncated": bool(queue) or len(files) >= max_files,
+        seen_fids = {
+            str(item.get("fid"))
+            for item in root_items
+            if item.get("fid") is not None
         }
-        return expanded
+        merged = list(root_items)
+        for item in sample_files:
+            fid = item.get("fid")
+            key = str(fid) if fid is not None else None
+            if key and key in seen_fids:
+                continue
+            if key:
+                seen_fids.add(key)
+            merged.append(item)
+
+        previewed = dict(root)
+        previewed["list"] = merged
+        previewed["preview"] = {
+            "mode": "sample",
+            "requests": requests_used,
+            "hops": hops,
+            "sampleFiles": len(sample_files),
+        }
+        return previewed
 
     def add_task(self, task: dict) -> dict:
         return self._request(
@@ -240,4 +255,3 @@ class QasClient:
                 if value and value != "[DONE]":
                     events.append(value)
         return {"submitted": True, "events": events}
-

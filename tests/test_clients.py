@@ -100,19 +100,24 @@ class QasClientTests(unittest.TestCase):
         )
         self.assertEqual(body["stoken"], "tok")
 
-    def test_get_share_expanded_bfs_into_nested_dirs(self):
+    def test_get_share_preview_samples_one_random_folder(self):
         root_url = "https://pan.quark.cn/s/crime"
         responses = {
             root_url: {
                 "success": True,
                 "data": {
-                    "share": {"title": "犯罪心理"},
+                    "share": {
+                        "title": "犯罪心理S01~S16",
+                        "size": 202848184964,
+                        "file_only_num": 327,
+                    },
                     "stoken": "st",
                     "list": [
                         {
                             "file_name": "犯罪心理S01~S16",
                             "dir": True,
                             "fid": "root-dir",
+                            "include_items": 16,
                         }
                     ],
                 },
@@ -135,6 +140,7 @@ class QasClientTests(unittest.TestCase):
                             "file_name": "犯罪心理.S01E01.1080P.mkv",
                             "dir": False,
                             "size": 1,
+                            "fid": "f1",
                         }
                     ],
                 },
@@ -144,9 +150,10 @@ class QasClientTests(unittest.TestCase):
                 "data": {
                     "list": [
                         {
-                            "file_name": "犯罪心理.S02E01.1080P.mkv",
+                            "file_name": "犯罪心理.S02E01.720P.mkv",
                             "dir": False,
                             "size": 1,
+                            "fid": "f2",
                         }
                     ],
                 },
@@ -159,20 +166,21 @@ class QasClientTests(unittest.TestCase):
             return FakeResponse(payload)
 
         client = QasClient("http://nas:5005", "token", opener=opener)
-        result = client.get_share_expanded(root_url)
+        result = client.get_share_preview(
+            root_url,
+            rng=__import__("random").Random(0),
+        )
 
-        names = [
+        sample_names = [
             item["file_name"]
             for item in result["list"]
             if not item.get("dir")
         ]
-        self.assertEqual(
-            names,
-            ["犯罪心理.S01E01.1080P.mkv", "犯罪心理.S02E01.1080P.mkv"],
-        )
-        self.assertTrue(result["expanded"])
-        self.assertEqual(result["expansion"]["files"], 2)
-        self.assertGreaterEqual(result["expansion"]["requests"], 3)
+        self.assertEqual(len(sample_names), 1)
+        self.assertTrue(sample_names[0].endswith(".mkv"))
+        self.assertEqual(result["preview"]["mode"], "sample")
+        self.assertLessEqual(result["preview"]["requests"], 4)
+        self.assertEqual(result["share"]["file_only_num"], 327)
 
     def test_http_error_never_contains_token(self):
         error = urllib.error.HTTPError(
