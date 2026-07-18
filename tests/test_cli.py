@@ -41,6 +41,10 @@ class FakeAria:
         self.calls.append(("cancel", gid))
         return gid
 
+    def remove_result(self, gid):
+        self.calls.append(("remove_result", gid))
+        return gid
+
 
 class FakeQas:
     def __init__(self, config=None):
@@ -132,6 +136,24 @@ class ResourceAgentTests(unittest.TestCase):
     def test_task_without_correlated_gid_is_rejected(self):
         with self.assertRaisesRegex(AgentError, "no managed aria2 task"):
             self.agent.downloads_control("rd-test", "cancel")
+
+    def test_cancel_uses_remove_result_for_stopped_task(self):
+        self.aria.stopped = [
+            {
+                "gid": "abc",
+                "status": "error",
+                "totalLength": "100",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "dir": "/nas/临时影视/.incoming/rd-test",
+                "files": [],
+                "errorMessage": "Download aborted.",
+            }
+        ]
+
+        self.agent.downloads_control("rd-test", "cancel")
+
+        self.assertEqual(self.aria.calls, [("remove_result", "abc")])
 
     def test_check_ready_reports_ready(self):
         roots = [

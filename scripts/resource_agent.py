@@ -105,7 +105,7 @@ class ResourceAgent:
         raise AgentError("task not found")
 
     def downloads_control(self, task_id: str, action: str) -> dict:
-        self._synchronize()
+        by_dir = self._synchronize()
         task = self.store.get_task(task_id)
         if task is None:
             raise AgentError("task not found")
@@ -114,13 +114,26 @@ class ResourceAgent:
         operations = {
             "pause": self.aria.pause,
             "resume": self.aria.unpause,
-            "cancel": self.aria.remove,
         }
-        if action not in operations:
+        if action not in (*operations, "cancel"):
             raise AgentError("unsupported download control")
-        results = [
-            operations[action](gid) for gid in task["aria2_gids"]
-        ]
+        if action == "cancel":
+            statuses = {
+                str(item.get("gid")): str(item.get("status", ""))
+                for item in by_dir.get(task["aria2_dir"].rstrip("/"), [])
+            }
+            results = [
+                (
+                    self.aria.remove_result(gid)
+                    if statuses.get(gid) in {"complete", "error", "removed"}
+                    else self.aria.remove(gid)
+                )
+                for gid in task["aria2_gids"]
+            ]
+        else:
+            results = [
+                operations[action](gid) for gid in task["aria2_gids"]
+            ]
         task["status"] = {
             "pause": "paused",
             "resume": "waiting",

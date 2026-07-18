@@ -100,3 +100,6 @@ class Aria2Client:
 
     def remove(self, gid: str) -> str:
         return str(self._call("remove", [gid]))
+
+    def remove_result(self, gid: str) -> str:
+        return str(self._call("removeDownloadResult", [gid]))

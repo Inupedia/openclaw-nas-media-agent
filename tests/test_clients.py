@@ -145,6 +145,23 @@ class Aria2ClientTests(unittest.TestCase):
         self.assertIn("completedLength", body["params"][1])
         self.assertIn("errorMessage", body["params"][1])
 
+    def test_stopped_result_can_be_removed(self):
+        opener = Mock(
+            return_value=FakeResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "resource-download-agent",
+                    "result": "abc",
+                }
+            )
+        )
+        client = Aria2Client("http://aria2/jsonrpc", "secret", opener=opener)
+
+        self.assertEqual(client.remove_result("abc"), "abc")
+
+        body = json.loads(opener.call_args.args[0].data)
+        self.assertEqual(body["method"], "aria2.removeDownloadResult")
+
 
 if __name__ == "__main__":
     unittest.main()
