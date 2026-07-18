@@ -28,8 +28,9 @@
 6. OpenClaw 不再拥有任意 shell、Python 或 HTTP 调用能力。
 7. 不弹出逐条执行批准，但非允许命令必须直接拒绝。
 8. Cookie、Token、RPC Secret 和敏感 Header 不得出现在命令行、JSON 输出、异常、日志或 Agent 上下文中。
-9. 文件访问和写入严格限制在用户授权的三个路径内。
-10. 测试不仅验证函数，还必须验证真实 OpenClaw 对话轨迹和副作用。
+9. 文件访问和写入严格限制在用户授权的四个路径内。
+10. 所有下载统一进入 `/volume2/downloads`；QAS 和 aria2 不得把正式媒体目录作为下载目标。
+11. 测试不仅验证函数，还必须验证真实 OpenClaw 对话轨迹和副作用。
 
 ## 3. 非目标
 
@@ -264,6 +265,7 @@ allowlist 只允许固定绝对路径的 `mediactl`。允许项不得是：
 
 用户数据只允许访问：
 
+- `/volume2/downloads`
 - `/volume2/影视`
 - `/volume3/临时影视`
 - `/volume4/openclaw`
@@ -277,10 +279,41 @@ allowlist 只允许固定绝对路径的 `mediactl`。允许项不得是：
 - 综艺：`/volume2/影视/Shows`
 - 其他：`/volume2/影视/Others`
 
-下载暂存：
+统一下载区：
 
-- 电影：`/volume3/临时影视/.incoming/<task-id>`
-- 其他：`/volume2/影视/.incoming/<task-id>`
+- 下载中：`/volume2/downloads/.incoming/<task-id>`
+- 校验通过：`/volume2/downloads/.ready/<task-id>`
+- 校验失败：`/volume2/downloads/.quarantine/<task-id>`
+
+QAS 和 aria2 只能把 `/volume2/downloads/.incoming/<task-id>` 作为下载目录。它们不得直接写入 `/volume2/影视` 或 `/volume3/临时影视`。
+
+### 11.1 下载、校验与转移状态机
+
+媒体进入正式库必须经过以下状态：
+
+```text
+planned → downloading → downloaded → verified → ready → organizing → organized
+                                           ↘ quarantine
+```
+
+从 `downloaded` 进入 `verified` 前必须确认：
+
+- aria2 任务已完成，不存在活动、等待或暂停 GID。
+- 不存在 `.aria2`、`.part` 或 `.tmp` 控制/临时文件。
+- 文件大小非零，并符合计划中的数量和大小边界。
+- 文件类型是允许的视频、字幕或元数据类型。
+- 视频可由 `ffprobe` 读取；不可读文件进入 `.quarantine`。
+- 本地正式库目标仍不存在，不允许覆盖。
+
+校验成功后先将任务目录移动到 `.ready/<task-id>`。整理操作必须生成独立的 `organize` 计划，向用户报告源、目标、命名变化、冲突和删除源文件的时机。
+
+转移规则：
+
+- 目标在 `/volume2/影视` 时，优先使用同文件系统原子重命名。
+- 目标在 `/volume3/临时影视` 时，先复制到目标目录内的隐藏临时目录，刷新并校验大小或哈希，再原子重命名为正式目录，最后删除下载区源文件。
+- 跨卷复制在目标校验完成前不得删除源文件。
+- 失败时保留可恢复副本并返回稳定 `nextAction`，不得留下半成品正式目录。
+- 取消下载默认保留 `.incoming` 数据；清理下载区必须另行生成删除计划并确认。
 
 路径验证必须基于解析后的绝对路径，拒绝：
 
@@ -345,7 +378,7 @@ aria2 控制操作只能作用于同时满足以下条件的任务：
 
 - GID 记录在本系统状态库中。
 - 任务由有效计划创建。
-- 下载目录位于对应 `.incoming/<task-id>`。
+- 下载目录位于 `/volume2/downloads/.incoming/<task-id>`。
 - 当前 aria2 返回的目录仍与记录一致。
 
 不满足任一条件时拒绝操作。取消任务默认保留已下载数据；清理暂存内容必须另行生成删除计划并确认。
@@ -399,7 +432,10 @@ aria2 控制操作只能作用于同时满足以下条件的任务：
 - “下载候选 2”先生成计划，再按确认规则执行。
 - 查看、暂停、继续和取消自有下载任务。
 - 尝试控制非自有 aria2 GID 被拒绝。
-- 尝试访问三个授权根以外的路径被拒绝。
+- 尝试访问四个授权根以外的路径被拒绝。
+- QAS/aria2 目标指向正式媒体目录时被拒绝。
+- 未完成或未通过校验的任务不能生成整理执行计划。
+- 跨卷转移在目标校验完成前不删除下载区源文件。
 - 任意 Python、curl 或 shell 命令被拒绝且不弹批准。
 
 真实下载测试只验证任务能够创建、查询、暂停、继续和安全取消，不等待资源完整下载。

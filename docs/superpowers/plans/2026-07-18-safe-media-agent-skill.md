@@ -10,7 +10,9 @@
 
 ## Global Constraints
 
-- User data access is limited to `/volume2/影视`, `/volume3/临时影视`, and `/volume4/openclaw`.
+- User data access is limited to `/volume2/downloads`, `/volume2/影视`, `/volume3/临时影视`, and `/volume4/openclaw`.
+- Every QAS/aria2 download target is `/volume2/downloads/.incoming/<task-id>`; formal media roots are never download destinations.
+- Completed downloads move through `.ready` or `.quarantine`; transfer to a formal library requires a separate organize plan.
 - NAS library results always appear before remote candidates.
 - A local title match terminates a normal search without remote calls.
 - Update and gap-fill operations may plan only episodes absent from the library, active downloads, and unexpired plans.
@@ -31,12 +33,14 @@
 - `scripts/library_catalog.py` — normalized title lookup and episode inventory.
 - `scripts/media_service.py` — NAS-first decision engine and read-only preview orchestration.
 - `scripts/episode_diff.py` — episode identity extraction and incremental set calculation.
+- `scripts/organizer.py` — completion validation and crash-safe transfer from the download area into a formal library.
 - `scripts/session_sanitizer.py` — backup-safe historical OpenClaw JSONL redaction.
 - `bin/mediactl` — sole executable entrypoint exposed to OpenClaw.
 - `tests/test_output_contract.py`
 - `tests/test_library_catalog.py`
 - `tests/test_media_service.py`
 - `tests/test_episode_diff.py`
+- `tests/test_organizer.py`
 - `tests/test_mediactl.py`
 - `tests/test_session_sanitizer.py`
 
@@ -46,6 +50,7 @@
 - `scripts/planner.py` — consume preview selections and incremental episode evidence instead of performing implicit search.
 - `scripts/state_store.py` — store plan hashes/schema and expose pending episode identities.
 - `scripts/resource_agent.py` — retain task control internals but route public commands through the safe service.
+- `config/routing.json` — route every media type through the unified download root while retaining formal destinations.
 - `SKILL.md` — concise trigger-rich, low-freedom OpenClaw instructions using only `mediactl`.
 - `tests/test_clients.py`
 - `tests/test_planner.py`
@@ -725,7 +730,121 @@ git add bin/mediactl scripts/resource_agent.py tests/test_mediactl.py tests/test
 git commit -m "feat: expose strict mediactl capability"
 ```
 
-### Task 7: Redact Historical OpenClaw Session Leakage
+### Task 7: Unified Download Area and Crash-Safe Organization
+
+**Files:**
+- Create: `scripts/organizer.py`
+- Create: `tests/test_organizer.py`
+- Modify: `config/routing.json`
+- Modify: `scripts/path_guard.py`
+- Modify: `scripts/planner.py`
+- Modify: `scripts/state_store.py`
+- Modify: `scripts/resource_agent.py`
+
+**Interfaces:**
+- Produces: `DownloadValidator.validate(task_id) -> ValidationReport`
+- Produces: `Organizer.plan(task_id) -> dict`
+- Produces: `Organizer.execute(plan_id, confirmed=False) -> dict`
+- Consumes only completed managed tasks rooted at `/volume2/downloads/.incoming/<task-id>` or `.ready/<task-id>`.
+
+- [ ] **Step 1: Write failing routing and lifecycle tests**
+
+```python
+class OrganizerTests(unittest.TestCase):
+    def test_every_route_uses_unified_download_root(self):
+        for name, route in self.routing.items():
+            if name == "downloads":
+                continue
+            self.assertEqual(route["staging_root"], "/volume2/downloads/.incoming")
+            self.assertEqual(route["aria2_prefix"], "downloads/.incoming")
+
+    def test_incomplete_task_cannot_be_organized(self):
+        task = self.make_task(status="active")
+        with self.assertRaisesRegex(OrganizeError, "not complete"):
+            self.organizer.plan(task["task_id"])
+
+    def test_temporary_or_zero_byte_media_is_quarantined(self):
+        task = self.make_task(status="complete")
+        source = Path(task["staging_path"])
+        source.mkdir(parents=True)
+        (source / "episode.mkv").write_bytes(b"")
+        (source / "episode.mkv.aria2").write_text("", encoding="utf-8")
+        report = self.validator.validate(task["task_id"])
+        self.assertEqual(report.next_action, "quarantine_download")
+
+    def test_cross_volume_copy_keeps_source_until_verified(self):
+        task = self.make_completed_movie_task()
+        plan = self.organizer.plan(task["task_id"])
+        self.copy_adapter.fail_verification = True
+        with self.assertRaisesRegex(OrganizeError, "verification"):
+            self.organizer.execute(plan["planId"], confirmed=True)
+        self.assertTrue(Path(task["staging_path"]).exists())
+        self.assertFalse(Path(task["final_path"]).exists())
+
+    def test_existing_final_target_is_never_overwritten(self):
+        task = self.make_completed_task()
+        Path(task["final_path"]).mkdir(parents=True)
+        with self.assertRaisesRegex(OrganizeError, "target exists"):
+            self.organizer.plan(task["task_id"])
+```
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```powershell
+& "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -m unittest tests.test_organizer -v
+```
+
+Expected: import failure because `organizer` does not exist and routing still points at media roots.
+
+- [ ] **Step 3: Implement the state machine and routing**
+
+Set every media route to:
+
+```json
+{
+  "aria2_prefix": "downloads/.incoming",
+  "staging_root": "/volume2/downloads/.incoming"
+}
+```
+
+Retain each media type's existing `final_root`. Add a top-level `downloads` route with `.incoming`, `.ready`, and `.quarantine`.
+
+Validation must require a managed completed task, no active/waiting/paused GID, no `.aria2`/`.part`/`.tmp`, non-zero allowed media files, a readable `ffprobe` result when available, and an absent final target.
+
+For `/volume2/影视`, rename the verified `.ready/<task-id>` directory on the same filesystem. For `/volume3/临时影视`, copy to `<final-parent>/.organizing-<task-id>`, fsync files and directories, compare the planned manifest, rename to the final target, then remove the `.ready` source. On failure, preserve the source and remove only the owned hidden temporary target after resolving it through `PathGuard`.
+
+- [ ] **Step 4: Expose separate validation and organization commands**
+
+Add:
+
+```text
+mediactl downloads validate TASK_ID
+mediactl organize plan TASK_ID
+mediactl organize execute PLAN_ID --confirmed
+```
+
+`downloads validate` may move a failed task only to `/volume2/downloads/.quarantine/<task-id>`. `organize execute` accepts no source or destination path from the Agent.
+
+- [ ] **Step 5: Run organizer, planner, path, and CLI tests and verify GREEN**
+
+Run:
+
+```powershell
+& "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -m unittest tests.test_organizer tests.test_planner tests.test_path_guard tests.test_cli tests.test_mediactl -v
+```
+
+Expected: all tests pass; no QAS/aria2 plan targets a formal media root.
+
+- [ ] **Step 6: Commit**
+
+```powershell
+git add config/routing.json scripts/organizer.py scripts/path_guard.py scripts/planner.py scripts/state_store.py scripts/resource_agent.py tests/test_organizer.py tests/test_planner.py tests/test_path_guard.py tests/test_cli.py tests/test_mediactl.py
+git commit -m "feat: stage downloads before safe library transfer"
+```
+
+### Task 8: Redact Historical OpenClaw Session Leakage
 
 **Files:**
 - Create: `scripts/session_sanitizer.py`
@@ -817,7 +936,7 @@ git add scripts/session_sanitizer.py tests/test_session_sanitizer.py
 git commit -m "fix: sanitize sensitive OpenClaw session output"
 ```
 
-### Task 8: Rewrite the Agent Skill as a Low-Freedom Contract
+### Task 9: Rewrite the Agent Skill as a Low-Freedom Contract
 
 **Files:**
 - Modify: `SKILL.md`
@@ -894,7 +1013,7 @@ git add SKILL.md tests/test_skill_contract.py
 git commit -m "feat: make media skill local-first and low-freedom"
 ```
 
-### Task 9: Deploy with Exec Allowlist and Sanitize the Incident
+### Task 10: Deploy with Exec Allowlist and Sanitize the Incident
 
 **Files:**
 - Deploy repository files to: `/volume4/openclaw/skills/resource-download-agent`
@@ -913,7 +1032,7 @@ Record without printing values:
 current Skill checksum
 current exec ask/security values
 current aria2 active/waiting counts
-current .incoming file counts
+current `/volume2/downloads/.incoming` file counts
 presence of the known incident session file
 presence of the mistaken cloud preview folder
 ```
@@ -940,12 +1059,15 @@ Do not print the matched secret. Recommend Cookie rotation to the user; do not c
 - [ ] **Step 4: Deploy artifact and switch policy in safe order**
 
 1. Install and `chmod 0755` `/volume4/openclaw/bin/mediactl`.
-2. Deploy the Skill and Python modules.
-3. Set `tools.exec.ask=off`.
-4. Set `tools.exec.security=allowlist`.
-5. Add only `/volume4/openclaw/bin/mediactl` to the allowlist.
-6. Remove broad interpreter/shell entries from the applicable OpenClaw exec policy.
-7. Reload/restart OpenClaw only if its Skill watcher does not load the new snapshot.
+2. Add `/volume2/downloads:/volume2/downloads` to the OpenClaw gateway compose.
+3. Add `/volume2/downloads:/nas/downloads` to the aria2 container.
+4. Create `.incoming`, `.ready`, and `.quarantine` with ownership and mode limited to the media workflow.
+5. Deploy the Skill and Python modules.
+6. Set `tools.exec.ask=off`.
+7. Set `tools.exec.security=allowlist`.
+8. Add only `/volume4/openclaw/bin/mediactl` to the allowlist.
+9. Remove broad interpreter/shell entries from the applicable OpenClaw exec policy.
+10. Recreate only containers whose volume definitions changed, then verify their health and mounts.
 
 At no point after deployment begins may the live policy return to `security=full`.
 
@@ -967,7 +1089,7 @@ Expected: only `mediactl` runs; all generic commands fail directly and never pro
 
 Commit only non-secret path/schema adjustments required by the verified NAS environment. Do not commit credentials, host-specific session IDs, raw logs, or backups.
 
-### Task 10: OpenClaw Conversation and Short Download Lifecycle Acceptance
+### Task 11: OpenClaw Conversation and Short Download Lifecycle Acceptance
 
 **Files:**
 - No production files unless a failing acceptance case first receives a regression test.
@@ -984,7 +1106,7 @@ Prompt:
 搜索《凡人修仙传》动画资源，先预览，不要下载
 ```
 
-Before and after, capture aria2 active/waiting counts, `.incoming` counts, and QAS task/cloud-folder counts without exposing secrets.
+Before and after, capture aria2 active/waiting counts, `/volume2/downloads/.incoming` counts, and QAS task/cloud-folder counts without exposing secrets.
 
 Expected:
 
@@ -1029,7 +1151,8 @@ Do not wait for the full media file.
 
 Confirm:
 
-- No files outside the three authorized roots changed.
+- No files outside the four authorized roots changed.
+- No QAS or aria2 task targeted `/volume2/影视` or `/volume3/临时影视`.
 - No foreign aria2 GID was controlled.
 - No existing episode was planned or downloaded.
 - No raw secret appears in new OpenClaw session output.
