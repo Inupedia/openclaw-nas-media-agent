@@ -1,0 +1,39 @@
+{
+  "movie": {
+    "cloud_prefix": "/OpenClaw/Movies",
+    "aria2_prefix": "临时影视/.incoming",
+    "staging_root": "/volume3/临时影视/.incoming",
+    "final_root": "/volume3/临时影视/Movie"
+  },
+  "tv": {
+    "cloud_prefix": "/OpenClaw/TV",
+    "aria2_prefix": "影视/.incoming",
+    "staging_root": "/volume2/影视/.incoming",
+    "final_root": "/volume2/影视/Drama"
+  },
+  "anime": {
+    "cloud_prefix": "/OpenClaw/Anime",
+    "aria2_prefix": "影视/.incoming",
+    "staging_root": "/volume2/影视/.incoming",
+    "final_root": "/volume2/影视/Anime"
+  },
+  "documentary": {
+    "cloud_prefix": "/OpenClaw/Documentary",
+    "aria2_prefix": "影视/.incoming",
+    "staging_root": "/volume2/影视/.incoming",
+    "final_root": "/volume2/影视/Documentary"
+  },
+  "show": {
+    "cloud_prefix": "/OpenClaw/Shows",
+    "aria2_prefix": "影视/.incoming",
+    "staging_root": "/volume2/影视/.incoming",
+    "final_root": "/volume2/影视/Shows"
+  },
+  "other": {
+    "cloud_prefix": "/OpenClaw/Others",
+    "aria2_prefix": "影视/.incoming",
+    "staging_root": "/volume2/影视/.incoming",
+    "final_root": "/volume2/影视/Others"
+  }
+}
+
