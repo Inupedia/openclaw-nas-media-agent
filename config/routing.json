@@ -11,6 +11,12 @@
     "staging_root": "/volume2/downloads/.incoming",
     "final_root": "/volume2/影视/Drama"
   },
+  "drama": {
+    "cloud_prefix": "/OpenClaw/TV",
+    "aria2_prefix": "downloads/.incoming",
+    "staging_root": "/volume2/downloads/.incoming",
+    "final_root": "/volume2/影视/Drama"
+  },
   "anime": {
     "cloud_prefix": "/OpenClaw/Anime",
     "aria2_prefix": "downloads/.incoming",

@@ -75,7 +75,7 @@ def classify(query: str, share: dict) -> Classification:
         media_type = "show"
         reasons.append("show_hint")
     elif episodes:
-        media_type = "tv"
+        media_type = "drama"
         reasons.append("episode_marker")
     else:
         video_files = [

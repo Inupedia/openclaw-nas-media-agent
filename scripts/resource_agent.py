@@ -254,13 +254,13 @@ def parse_args(argv) -> argparse.Namespace:
     lookup.add_argument("query")
     lookup.add_argument(
         "--media-type",
-        choices=("movie", "tv", "anime", "documentary", "show", "other"),
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
     )
     search = subparsers.add_parser("search")
     search.add_argument("query")
     search.add_argument(
         "--media-type",
-        choices=("movie", "tv", "anime", "documentary", "show", "other"),
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
     )
     search.add_argument("--update", action="store_true")
     preview = subparsers.add_parser("preview")

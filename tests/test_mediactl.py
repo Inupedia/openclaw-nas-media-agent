@@ -65,6 +65,11 @@ class MediaCtlContractTests(unittest.TestCase):
         self.assertEqual(args.media_type, "anime")
         self.assertTrue(args.update)
 
+    def test_parser_supports_drama_media_type(self):
+        args = parse_args(["search", "Example Show", "--media-type", "drama"])
+
+        self.assertEqual(args.media_type, "drama")
+
     def test_parser_supports_validation_and_separate_organize_plan(self):
         validate = parse_args(["downloads", "validate", "rd-show"])
         organize_plan = parse_args(["organize", "plan", "rd-show"])

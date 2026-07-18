@@ -35,13 +35,13 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(result.year, 2024)
         self.assertGreaterEqual(result.confidence, 0.85)
 
-    def test_sxxexx_is_tv(self):
+    def test_sxxexx_is_drama(self):
         result = classify(
             "黑镜 第二季",
             share("Black.Mirror.S02E03.1080p.mkv"),
         )
 
-        self.assertEqual(result.media_type, "tv")
+        self.assertEqual(result.media_type, "drama")
         self.assertEqual(result.season, 2)
         self.assertEqual(result.episodes, [3])
 
@@ -61,7 +61,7 @@ class ClassificationTests(unittest.TestCase):
             share("某剧.S00E01.特别篇.mkv"),
         )
 
-        self.assertEqual(result.media_type, "tv")
+        self.assertEqual(result.media_type, "drama")
         self.assertEqual(result.season, 0)
         self.assertEqual(result.episodes, [1])
 
@@ -82,6 +82,18 @@ class NamingTests(unittest.TestCase):
             encoding="utf-8",
         ) as routing_file:
             self.routing = json.load(routing_file)
+
+    def test_drama_uses_the_existing_tv_route(self):
+        for key in (
+            "cloud_prefix",
+            "aria2_prefix",
+            "staging_root",
+            "final_root",
+        ):
+            self.assertEqual(
+                self.routing["drama"][key],
+                self.routing["tv"][key],
+            )
 
     def test_title_normalization_removes_ads_and_technical_tags(self):
         normalized = normalize_title(
