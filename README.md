@@ -19,7 +19,7 @@ https://github.com/Inupedia/openclaw-nas-media-agent
 2. 询问并确认下载暂存目录、正式影视库和临时影视库的真实路径。
 3. 用 git clone 安装到 OpenClaw workspace 的 skills/resource-download-agent。
 4. 给 OpenClaw、QAS 和 aria2 挂载同一个下载目录；aria2 容器内必须能以 /nas/downloads 访问该目录。
-5. 配置 QAS_BASE_URL、QAS_TOKEN、ARIA2_RPC_URL、ARIA2_RPC_SECRET 和 RESOURCE_AGENT_STATE_DB，但绝对不要在回复、日志或提交中输出真实凭据。
+5. 配置 QAS_BASE_URL、QAS_TOKEN、PANSOU_BASE_URL、PANSOU_MAX_CANDIDATES、ARIA2_RPC_URL、ARIA2_RPC_SECRET 和 RESOURCE_AGENT_STATE_DB，但绝对不要在回复、日志或提交中输出真实凭据或真实内网地址。
 6. OpenClaw 的 exec 使用 allowlist，ask 关闭，只允许执行本项目 bin/mediactl 的固定绝对路径；不要开放任意 shell、Python、curl 或 sudo。
 7. /volume2/影视 和 /volume3/临时影视 是永久保护库：不得删除、覆盖、清理或把已有内容移出。我的路径不同时，请修改 routing.json 和保护根目录后再部署。
 8. 先运行完整测试和 mediactl check-ready，再用“只预览、不下载”的搜索做验收。
@@ -62,7 +62,7 @@ git pull --ff-only
 1. 先查询 NAS。
 2. 本地已有时停止普通远端搜索。
 3. 追更时只计算缺失集数。
-4. 深度检查远端候选的实际文件。
+4. 用 QAS + PanSou 全面发现候选，再由 QAS 深度检查实际文件。
 5. 把不同规格全部列给用户选择。
 6. 只把选中的内容下载到暂存区。
 7. 下载完成后校验。
@@ -110,7 +110,11 @@ OpenClaw 负责识别用户意图、读取 `SKILL.md` 并调用固定的 `mediac
 
 ### QAS
 
-本项目通过 QAS HTTP API 搜索和预览网盘资源。已验证的部署使用 `cp0204/quark-auto-save`，但仓库不保存 QAS Cookie、Token 或分享链接。
+本项目通过 QAS HTTP API 搜索、预览和执行网盘任务。已验证的部署使用 `cp0204/quark-auto-save`，但仓库不保存 QAS Cookie、Token 或分享链接。
+
+### PanSou
+
+PanSou 只用于补充发现夸克候选。每个候选仍由 QAS 预览、过滤和执行；PanSou 不接触 Cookie，不直接转存或下载。相同分享会去重，默认最多接纳 50 个 PanSou 候选，配置上限为 100。
 
 ### aria2
 
@@ -139,6 +143,8 @@ QAS 和 aria2 都不得把正式媒体库作为直接下载目标。
 environment:
   QAS_BASE_URL: "http://<qas-host>:<qas-port>"
   QAS_TOKEN: "<qas-token>"
+  PANSOU_BASE_URL: "http://<pansou-host>:<pansou-port>"
+  PANSOU_MAX_CANDIDATES: "50"
   ARIA2_RPC_URL: "http://<aria2-host>:<aria2-port>/jsonrpc"
   ARIA2_RPC_SECRET: "<aria2-rpc-secret>"
   RESOURCE_AGENT_STATE_DB: "/root/.openclaw/workspace/data/resource-download-agent/state.db"
@@ -188,7 +194,9 @@ NAS 本地查询
   ├─ 普通搜索且本地已有 → 报告本地结果并停止
   └─ 本地没有 / 明确要求更新
         ↓
-QAS 搜索并深度检查候选
+QAS + PanSou 聚合发现候选
+        ↓
+QAS 预览、验证并提取规格
         ↓
 按画质、编码、字幕、大小和集数列出全部有效规格
         ↓
@@ -284,6 +292,8 @@ bin/mediactl organize execute PLAN_ID --confirmed
 ```
 
 所有命令只输出一个 JSON 文档。智能体应优先读取 `ok`、`terminal`、`nextAction`、`data` 和 `error`，不要解析 Markdown。
+
+候选中的 `discoverySources` 只会包含 `qas` 和 `pansou`，用于说明发现来源；不会返回底层分享链接或服务地址。PanSou 暂时不可用时，搜索会给出安全警告并继续使用 QAS 结果。
 
 ## 安全边界
 

@@ -12,6 +12,7 @@ from library_catalog import LibraryCatalog
 from media_service import MediaService
 from organizer import DownloadValidator, OrganizeError, Organizer
 from output_contract import failure, success
+from pansou_client import PanSouClient
 from path_guard import PathGuard
 from planner import DownloadPlanner, PlanningError
 from qas_client import ClientError, QasClient
@@ -36,6 +37,14 @@ def _int(value) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _pansou_limit(value: str | None) -> int:
+    try:
+        parsed = int(value or "50")
+    except ValueError:
+        return 50
+    return parsed if 1 <= parsed <= 100 else 50
 
 
 class ResourceAgent:
@@ -210,6 +219,7 @@ def _load_runtime():
     required = [
         "QAS_BASE_URL",
         "QAS_TOKEN",
+        "PANSOU_BASE_URL",
         "ARIA2_RPC_URL",
         "ARIA2_RPC_SECRET",
     ]
@@ -224,6 +234,12 @@ def _load_runtime():
     )
     store = StateStore(state_path)
     qas = QasClient(os.environ["QAS_BASE_URL"], os.environ["QAS_TOKEN"])
+    pansou = PanSouClient(
+        os.environ["PANSOU_BASE_URL"],
+        max_candidates=_pansou_limit(
+            os.environ.get("PANSOU_MAX_CANDIDATES")
+        ),
+    )
     aria = Aria2Client(
         os.environ["ARIA2_RPC_URL"],
         os.environ["ARIA2_RPC_SECRET"],
@@ -233,7 +249,7 @@ def _load_runtime():
         store=store,
         routing=routing,
     )
-    return routing, store, qas, aria, planner
+    return routing, store, qas, aria, planner, pansou
 
 
 def parse_args(argv) -> argparse.Namespace:
@@ -308,13 +324,13 @@ def emit(result: dict, *, stream=None) -> None:
     )
 
 
-def _default_service_factory(routing, store, qas):
+def _default_service_factory(routing, store, qas, pansou):
     roots = {
         media_type: Path(route["final_root"])
         for media_type, route in routing.items()
         if isinstance(route, dict) and route.get("final_root")
     }
-    return MediaService(LibraryCatalog(roots), qas, store)
+    return MediaService(LibraryCatalog(roots), qas, store, pansou)
 
 
 def _ffprobe_runner(path: Path) -> bool:
@@ -385,9 +401,9 @@ def main(
     store = None
     try:
         args = parse_args(arguments)
-        routing, store, qas, aria, planner = runtime_loader()
+        routing, store, qas, aria, planner, pansou = runtime_loader()
         agent = ResourceAgent(store=store, qas=qas, aria=aria)
-        service = service_factory(routing, store, qas)
+        service = service_factory(routing, store, qas, pansou)
         if args.command == "check-ready":
             roots = [
                 Path(route["staging_root"])

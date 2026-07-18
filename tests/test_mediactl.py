@@ -117,8 +117,15 @@ class MediaCtlContractTests(unittest.TestCase):
 
         exit_code = main(
             ["search", "凡人修仙传", "--media-type", "anime"],
-            runtime_loader=lambda: ({}, store, object(), object(), object()),
-            service_factory=lambda routing, loaded_store, qas: service,
+            runtime_loader=lambda: (
+                {},
+                store,
+                object(),
+                object(),
+                object(),
+                object(),
+            ),
+            service_factory=lambda routing, loaded_store, qas, pansou: service,
             stream=stream,
         )
 

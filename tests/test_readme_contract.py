@@ -23,6 +23,7 @@ class ReadmeContractTests(unittest.TestCase):
             "/volume3/临时影视",
             "mediactl",
             "QAS_BASE_URL",
+            "PANSOU_BASE_URL",
             "ARIA2_RPC_URL",
             "drama",
             "中英双语",
@@ -40,6 +41,13 @@ class ReadmeContractTests(unittest.TestCase):
         )
         for pattern in forbidden_patterns:
             self.assertIsNone(re.search(pattern, content, re.IGNORECASE))
+
+    def test_readme_documents_local_and_aggregated_preview_flow(self):
+        content = self.readme_path.read_text(encoding="utf-8")
+        self.assertIn("NAS 本地", content)
+        self.assertIn("QAS + PanSou", content)
+        self.assertIn("QAS 预览", content)
+        self.assertIn("discoverySources", content)
 
     def test_repository_declares_mit_license(self):
         license_path = self.readme_path.parent / "LICENSE"

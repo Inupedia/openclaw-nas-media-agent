@@ -11,7 +11,13 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from resource_agent import AgentError, ResourceAgent, main
+from resource_agent import (
+    AgentError,
+    ResourceAgent,
+    _load_runtime,
+    _pansou_limit,
+    main,
+)
 from state_store import StateStore
 
 
@@ -198,6 +204,33 @@ class ResourceAgentTests(unittest.TestCase):
         self.assertTrue(result["terminal"])
         self.assertEqual(result["error"]["code"], "AGENT_ERROR")
         self.assertNotIn("traceback", output.getvalue().lower())
+
+    def test_pansou_candidate_limit_is_safely_bounded(self):
+        self.assertEqual(_pansou_limit(None), 50)
+        self.assertEqual(_pansou_limit("25"), 25)
+        for invalid in ("invalid", "0", "-1", "101"):
+            self.assertEqual(_pansou_limit(invalid), 50)
+
+    def test_runtime_loader_creates_private_pansou_client(self):
+        state_path = Path(self.temp_dir.name) / "runtime-state.db"
+        environment = {
+            "QAS_BASE_URL": "http://qas.invalid",
+            "QAS_TOKEN": "qas-secret",
+            "PANSOU_BASE_URL": "http://pansou.invalid",
+            "PANSOU_MAX_CANDIDATES": "25",
+            "ARIA2_RPC_URL": "http://aria.invalid",
+            "ARIA2_RPC_SECRET": "aria-secret",
+            "RESOURCE_AGENT_STATE_DB": str(state_path),
+        }
+
+        with patch.dict(os.environ, environment, clear=True):
+            runtime = _load_runtime()
+
+        self.assertEqual(len(runtime), 6)
+        pansou = runtime[5]
+        self.assertEqual(pansou.max_candidates, 25)
+        self.assertNotIn(environment["PANSOU_BASE_URL"], repr(pansou))
+        runtime[1].close()
 
 
 if __name__ == "__main__":

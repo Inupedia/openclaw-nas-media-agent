@@ -43,6 +43,8 @@ class SkillContractTests(unittest.TestCase):
         for variable in (
             "QAS_BASE_URL",
             "QAS_TOKEN",
+            "PANSOU_BASE_URL",
+            "PANSOU_MAX_CANDIDATES",
             "ARIA2_RPC_URL",
             "ARIA2_RPC_SECRET",
             "RESOURCE_AGENT_STATE_DB",

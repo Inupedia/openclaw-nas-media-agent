@@ -1,7 +1,7 @@
 ---
 name: resource-download-agent
 description: Use when 用户要求搜索、查找、预览、推荐或下载电影、电视剧、动画、动漫、综艺、纪录片等影视资源，或要求追更、补集、检查更新、换版本、查看下载状态、暂停、继续、取消、删除、校验、整理、释放空间、压缩或转码。
-metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL","QAS_TOKEN","ARIA2_RPC_URL","ARIA2_RPC_SECRET","RESOURCE_AGENT_STATE_DB"]},"envVars":[{"name":"QAS_BASE_URL","required":true,"description":"QAS API endpoint"},{"name":"QAS_TOKEN","required":true,"description":"QAS API credential"},{"name":"ARIA2_RPC_URL","required":true,"description":"aria2 RPC endpoint"},{"name":"ARIA2_RPC_SECRET","required":true,"description":"aria2 RPC credential"},{"name":"RESOURCE_AGENT_STATE_DB","required":true,"description":"Agent state database path"}]}}
+metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL","QAS_TOKEN","PANSOU_BASE_URL","ARIA2_RPC_URL","ARIA2_RPC_SECRET","RESOURCE_AGENT_STATE_DB"]},"envVars":[{"name":"QAS_BASE_URL","required":true,"description":"QAS API endpoint"},{"name":"QAS_TOKEN","required":true,"description":"QAS API credential"},{"name":"PANSOU_BASE_URL","required":true,"description":"PanSou API endpoint"},{"name":"PANSOU_MAX_CANDIDATES","required":false,"description":"PanSou unique candidate limit, default 50 and maximum 100"},{"name":"ARIA2_RPC_URL","required":true,"description":"aria2 RPC endpoint"},{"name":"ARIA2_RPC_SECRET","required":true,"description":"aria2 RPC credential"},{"name":"RESOURCE_AGENT_STATE_DB","required":true,"description":"Agent state database path"}]}}
 ---
 
 # Resource Download Agent
@@ -22,6 +22,7 @@ metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL
 - 更新结果只能包含本地缺少、且不在下载中或待执行计划里的集。
 - `nextAction: incremental_selection_unavailable` 表示远端不能安全地只选新增集；停止并让用户决定，不要转存全集。
 - 只说“搜索、看看、预览、推荐、有什么可看”时，绝不创建或执行下载计划。
+- 远端发现会聚合 QAS 与 PanSou；所有 PanSou 候选仍必须经过 QAS 只读预览，不能绕过既有计划和确认流程。
 
 ## 输出顺序
 
@@ -50,6 +51,8 @@ NAS 本地结果必须排在远端候选之前。
 `--media-type` 只能是 `movie`、`drama`、`tv`、`anime`、`documentary`、`show` 或 `other`。电视剧优先使用 `drama`；`tv` 只为旧任务兼容。不确定类型时省略，不要猜。
 
 搜索返回 `specificationGroups` 时，必须把所有不同规格列给用户选择。每组至少报告可用的分辨率、HDR/Dolby Vision、视频编码、音频、字幕、总大小、文件数和季集范围。`中英双语`字幕排在同等候选前面并标记优选，但不得自动选择候选、不得只展示评分最高或文件最大的版本。用户必须从已展示的 `candidateId` 中选择；选择仍不明确时继续询问。
+
+`discoverySources` 只表示候选由 `qas`、`pansou` 或两者发现。它不改变安全级别，也不能作为自动选择依据。返回 `warnings: ["pansou_unavailable"]` 时，简短说明 PanSou 暂时不可用，但仍应展示已有的 QAS 候选。
 
 预览候选：
 
