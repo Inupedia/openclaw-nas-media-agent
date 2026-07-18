@@ -10,15 +10,17 @@ from media_classifier import (
     extract_candidate_spec,
 )
 from output_contract import success
+from pansou_client import PanSouError, normalize_quark_url, query_variants
 from qas_client import ClientError
 from state_store import StateStore
 
 
 class MediaService:
-    def __init__(self, catalog, qas, store: StateStore):
+    def __init__(self, catalog, qas, store: StateStore, pansou=None):
         self.catalog = catalog
         self.qas = qas
         self.store = store
+        self.pansou = pansou
 
     def search(
         self,
@@ -42,9 +44,10 @@ class MediaService:
         if update:
             return self._search_update(query, media_type, local)
 
+        candidates, warnings = self._discover_candidates(query)
         projected = []
         rejected = {}
-        for candidate in self.qas.search(query, deep=True):
+        for candidate in candidates:
             share_url = candidate.get("shareurl") or candidate.get("url")
             if not share_url:
                 self._count_rejection(rejected, "missing_share")
@@ -89,6 +92,7 @@ class MediaService:
                         or "未命名候选"
                     ),
                     "provider": "quark",
+                    "discoverySources": candidate["_discoverySources"],
                     "specification": self._safe_specification(specification),
                 }
             )
@@ -102,6 +106,7 @@ class MediaService:
                 "specificationGroups": self._group_candidates(projected),
                 "candidateCount": len(projected),
                 "rejectedCandidateCounts": rejected,
+                **({"warnings": warnings} if warnings else {}),
             },
             terminal=not projected,
             next_action="choose_candidate" if projected else "no_candidates",
@@ -136,7 +141,8 @@ class MediaService:
         projected = []
         all_missing: set[EpisodeKey] = set()
         selection_failed = False
-        for candidate in self.qas.search(query, deep=True):
+        candidates, warnings = self._discover_candidates(query)
+        for candidate in candidates:
             share_url = candidate.get("shareurl") or candidate.get("url")
             if not share_url:
                 continue
@@ -197,6 +203,7 @@ class MediaService:
                         or "未命名候选"
                     ),
                     "provider": "quark",
+                    "discoverySources": candidate["_discoverySources"],
                     "newEpisodes": serialized_missing,
                     "specification": self._safe_specification(specification),
                 }
@@ -208,6 +215,7 @@ class MediaService:
                     "local": local,
                     "missing": [],
                     "remoteCandidates": [],
+                    **({"warnings": warnings} if warnings else {}),
                 },
                 terminal=True,
                 next_action="already_up_to_date",
@@ -218,6 +226,7 @@ class MediaService:
                     "local": local,
                     "missing": self._serialize_episodes(all_missing),
                     "remoteCandidates": [],
+                    **({"warnings": warnings} if warnings else {}),
                 },
                 terminal=True,
                 next_action=(
@@ -235,10 +244,54 @@ class MediaService:
                 "specificationGroups": self._group_candidates(projected),
                 "candidateCount": len(projected),
                 "rejectedCandidateCounts": {},
+                **({"warnings": warnings} if warnings else {}),
             },
             terminal=False,
             next_action="choose_candidate",
         )
+
+    def _discover_candidates(self, query: str) -> tuple[list[dict], list[str]]:
+        discovered = []
+        by_share = {}
+        warnings = []
+        pansou_available = self.pansou is not None
+
+        for variant in query_variants(query):
+            sources = [("qas", self.qas.search(variant, deep=True))]
+            if pansou_available:
+                try:
+                    sources.append(("pansou", self.pansou.search(variant)))
+                except PanSouError:
+                    warnings.append("pansou_unavailable")
+                    pansou_available = False
+
+            for source, candidates in sources:
+                for raw_candidate in candidates:
+                    candidate = dict(raw_candidate)
+                    share_url = candidate.get("shareurl") or candidate.get("url")
+                    normalized = normalize_quark_url(share_url)
+                    key = normalized or str(share_url or "").strip()
+                    if not key:
+                        discovered.append(
+                            {
+                                **candidate,
+                                "_discoverySources": [source],
+                            }
+                        )
+                        continue
+                    existing = by_share.get(key)
+                    if existing:
+                        if source not in existing["_discoverySources"]:
+                            existing["_discoverySources"].append(source)
+                        continue
+                    if normalized:
+                        candidate["shareurl"] = normalized
+                        candidate.pop("url", None)
+                    candidate["_discoverySources"] = [source]
+                    by_share[key] = candidate
+                    discovered.append(candidate)
+
+        return discovered, warnings
 
     @staticmethod
     def _serialize_episodes(
@@ -320,6 +373,7 @@ class MediaService:
                     "candidateId": candidate["candidateId"],
                     "title": candidate["title"],
                     "provider": candidate["provider"],
+                    "discoverySources": candidate["discoverySources"],
                     "totalBytes": specification.get("totalBytes", 0),
                     **(
                         {"newEpisodes": candidate["newEpisodes"]}

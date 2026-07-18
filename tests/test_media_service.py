@@ -9,6 +9,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from media_service import MediaService
+from pansou_client import PanSouError
 from state_store import StateStore
 
 
@@ -47,6 +48,19 @@ class RecordingQas:
         self.writes.append(("run", task))
 
 
+class RecordingPanSou:
+    def __init__(self, candidates=None, error=None):
+        self.candidates = candidates or []
+        self.error = error
+        self.reads = []
+
+    def search(self, query):
+        self.reads.append(query)
+        if self.error:
+            raise self.error
+        return list(self.candidates)
+
+
 class MediaServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -65,7 +79,8 @@ class MediaServiceTests(unittest.TestCase):
             "fileCount": 680,
         }
         qas = RecordingQas()
-        service = MediaService(FakeCatalog(local), qas, self.store)
+        pansou = RecordingPanSou()
+        service = MediaService(FakeCatalog(local), qas, self.store, pansou)
 
         result = service.search(
             "搜索《凡人修仙传》动画资源",
@@ -78,6 +93,112 @@ class MediaServiceTests(unittest.TestCase):
         self.assertEqual(result["data"]["remoteCandidates"], [])
         self.assertEqual(qas.reads, [])
         self.assertEqual(qas.writes, [])
+        self.assertEqual(pansou.reads, [])
+
+    def test_both_sources_use_sequel_variants_and_duplicate_is_previewed_once(self):
+        url = "https://pan.quark.cn/s/shared-result"
+        qas = RecordingQas(
+            candidates=[{"taskname": "QAS title", "shareurl": url}],
+            shares={
+                url: {
+                    "share": {"title": "幼女战记 第二季"},
+                    "list": [
+                        {
+                            "file_name": "幼女战记.S02E01.1080p.HEVC.mkv",
+                            "size": 2_000,
+                        }
+                    ],
+                }
+            },
+        )
+        pansou = RecordingPanSou(
+            [{"taskname": "PanSou title", "shareurl": f"{url}/"}]
+        )
+        service = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "幼女战记2", "matches": []}),
+            qas,
+            self.store,
+            pansou,
+        )
+
+        result = service.search("幼女战记2", "anime")
+
+        variants = ["幼女战记2", "幼女战记", "幼女战记 第2季", "幼女战记 S02"]
+        self.assertEqual(
+            [read[1] for read in qas.reads if read[0] == "search"],
+            variants,
+        )
+        self.assertEqual(pansou.reads, variants)
+        self.assertEqual(
+            len([read for read in qas.reads if read[0] == "share"]),
+            1,
+        )
+        candidate = result["data"]["remoteCandidates"][0]
+        self.assertEqual(candidate["discoverySources"], ["qas", "pansou"])
+        self.assertEqual(candidate["title"], "QAS title")
+        serialized = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn(url, serialized)
+        self.assertNotIn("private-pansou", serialized)
+
+    def test_pansou_only_candidate_is_previewed_by_qas(self):
+        url = "https://pan.quark.cn/s/pansou-only"
+        qas = RecordingQas(
+            shares={
+                url: {
+                    "share": {"title": "Example"},
+                    "list": [
+                        {
+                            "file_name": "Example.S01E01.1080p.chs-eng.mkv",
+                            "size": 1_000,
+                        }
+                    ],
+                }
+            }
+        )
+        pansou = RecordingPanSou(
+            [{"taskname": "PanSou candidate", "shareurl": url}]
+        )
+
+        result = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "Example", "matches": []}),
+            qas,
+            self.store,
+            pansou,
+        ).search("Example", "drama")
+
+        self.assertEqual(result["data"]["candidateCount"], 1)
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["discoverySources"],
+            ["pansou"],
+        )
+        self.assertIn(("share", url, True), qas.reads)
+
+    def test_pansou_failure_keeps_qas_results_and_adds_safe_warning(self):
+        url = "https://pan.quark.cn/s/qas-result"
+        qas = RecordingQas(
+            candidates=[{"taskname": "QAS title", "shareurl": url}],
+            shares={
+                url: {
+                    "share": {"title": "Example"},
+                    "list": [{"file_name": "Example.1080p.mkv", "size": 1_000}],
+                }
+            },
+        )
+        pansou = RecordingPanSou(
+            error=PanSouError("private-pansou endpoint unavailable")
+        )
+
+        result = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "Example", "matches": []}),
+            qas,
+            self.store,
+            pansou,
+        ).search("Example", "movie")
+
+        self.assertEqual(result["data"]["candidateCount"], 1)
+        self.assertEqual(result["data"]["warnings"], ["pansou_unavailable"])
+        self.assertEqual(pansou.reads, ["Example"])
+        self.assertNotIn("private-pansou", json.dumps(result))
 
     def test_missing_local_title_returns_opaque_remote_candidates(self):
         url = "https://pan.quark.cn/s/secret-share"
@@ -265,7 +386,10 @@ class MediaServiceTests(unittest.TestCase):
             ],
             "fileCount": 119,
         }
-        service = MediaService(FakeCatalog(local), qas, self.store)
+        pansou = RecordingPanSou(
+            [{"taskname": "duplicate update", "shareurl": url}]
+        )
+        service = MediaService(FakeCatalog(local), qas, self.store, pansou)
 
         result = service.search(
             "检查《凡人修仙传》有没有新集",
@@ -283,6 +407,11 @@ class MediaServiceTests(unittest.TestCase):
         self.assertEqual(
             stored["selectedFiles"],
             ["凡人修仙传.S01E120.mkv"],
+        )
+        self.assertEqual(pansou.reads, ["检查《凡人修仙传》有没有新集"])
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["discoverySources"],
+            ["qas", "pansou"],
         )
         self.assertEqual(qas.writes, [])
 
