@@ -28,6 +28,10 @@ DNS resolution.
 Only PanSou may use the new proxy.
 
 - Run a dedicated Mihomo container named `pansou-proxy`.
+- When the NAS cannot reach Docker Hub, build the proxy image locally from the
+  official Mihomo v1.19.28 Linux amd64 GitHub Release after verifying SHA-256
+  `d5967e079d9f793515a5a8193aabda455f7e012427eccd567dbc4f2f15498204`.
+  Do not substitute an unverified registry mirror.
 - Attach it only to the private Docker network shared with PanSou.
 - Publish no proxy port on the NAS host.
 - Do not set host-level, Docker-daemon-level, OpenClaw, aria2, QAS, or OpenList

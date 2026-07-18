@@ -6,7 +6,7 @@
 
 **Architecture:** A private Mihomo container provides an unexposed SOCKS5 endpoint to a temporary PanSou canary on the existing `pansou-network`. The canary uses the normalized official source lists and is compared with the official public instance; only a passing canary is promoted to the existing LAN-only production endpoint.
 
-**Tech Stack:** Docker Engine, Docker Compose, Mihomo, official PanSou image, POSIX shell, Python 3 with PyYAML, SSH/SFTP.
+**Tech Stack:** Docker Engine, Docker Compose, Mihomo v1.19.28 official GitHub Release, official PanSou image, POSIX shell, Python 3 with PyYAML, SSH.
 
 ## Global Constraints
 
@@ -18,6 +18,10 @@
 - Keep the current production PanSou container unchanged until the canary passes.
 - Do not delete the old production container, rollback data, or any media file.
 - Do not create automatic retries, schedulers, or background monitoring.
+- Build Mihomo from the official `mihomo-linux-amd64-v1.19.28.gz` Release
+  asset and require SHA-256
+  `d5967e079d9f793515a5a8193aabda455f7e012427eccd567dbc4f2f15498204`;
+  do not use an unverified registry mirror.
 
 ---
 
@@ -90,6 +94,7 @@ Expected: no matches.
 **Files:**
 - Create on NAS: `/volume4/docker/pansou-proxy/compose.yaml`
 - Create on NAS: `/volume4/docker/pansou-proxy/config/config.yaml`
+- Create on NAS: `/volume4/docker/pansou-proxy/image/Dockerfile`
 
 **Interfaces:**
 - Consumes: private subscription supplied by the user in process memory
@@ -167,12 +172,48 @@ Expected: exit code `0`, a non-empty mode-`0600` target file, and no secret
 output. Remove only the non-secret extractor after configuration validation;
 retain the generated target because Mihomo requires it.
 
-- [ ] **Step 3: Write the proxy Compose definition**
+- [ ] **Step 3: Build the verified local Mihomo image**
+
+Download this exact official asset on the local workstation:
+
+```text
+https://github.com/MetaCubeX/mihomo/releases/download/v1.19.28/mihomo-linux-amd64-v1.19.28.gz
+```
+
+Require its SHA-256 to equal:
+
+```text
+d5967e079d9f793515a5a8193aabda455f7e012427eccd567dbc4f2f15498204
+```
+
+Stream the verified file over SSH to
+`/volume4/docker/pansou-proxy/image/mihomo.gz`, verify the same SHA-256 again
+on the NAS, decompress it, and build this registry-independent image:
+
+```dockerfile
+FROM scratch
+COPY mihomo /mihomo
+COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["/mihomo"]
+```
+
+Tag it `local/mihomo:v1.19.28`. Verify:
+
+```sh
+docker run --rm local/mihomo:v1.19.28 -v
+docker run --rm \
+  -v /volume4/docker/pansou-proxy/config:/root/.config/mihomo:ro \
+  local/mihomo:v1.19.28 -t -d /root/.config/mihomo
+```
+
+Expected: version `v1.19.28` and a successful configuration test.
+
+- [ ] **Step 4: Write the proxy Compose definition**
 
 ```yaml
 services:
   pansou-proxy:
-    image: ghcr.io/metacubex/mihomo:latest
+    image: local/mihomo:v1.19.28
     container_name: pansou-proxy
     command: ["-d", "/root/.config/mihomo"]
     volumes:
@@ -194,18 +235,18 @@ networks:
 
 Save as `/volume4/docker/pansou-proxy/compose.yaml` with mode `0600`.
 
-- [ ] **Step 4: Validate configuration before starting**
+- [ ] **Step 5: Validate configuration before starting**
 
 ```sh
 docker run --rm \
   -v /volume4/docker/pansou-proxy/config:/root/.config/mihomo:ro \
-  ghcr.io/metacubex/mihomo:latest \
+  local/mihomo:v1.19.28 \
   -t -d /root/.config/mihomo
 ```
 
 Expected: configuration test succeeds without printing proxy credentials.
 
-- [ ] **Step 5: Start and test the proxy**
+- [ ] **Step 6: Start and test the proxy**
 
 ```sh
 docker compose -f /volume4/docker/pansou-proxy/compose.yaml up -d
