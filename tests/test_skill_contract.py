@@ -63,6 +63,17 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("不要输出 Cookie", self.content)
         self.assertIn("incremental_selection_unavailable", self.content)
 
+    def test_skill_requires_user_selected_specification_choices(self):
+        self.assertIn("drama", self.content)
+        self.assertIn("specificationGroups", self.content)
+        self.assertIn("中英双语", self.content)
+        self.assertIn("不得自动选择", self.content)
+
+    def test_skill_permanently_protects_formal_libraries(self):
+        self.assertIn("/volume2/影视", self.content)
+        self.assertIn("/volume3/临时影视", self.content)
+        self.assertIn("永远不得删除", self.content)
+
 
 if __name__ == "__main__":
     unittest.main()

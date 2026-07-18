@@ -47,7 +47,9 @@ NAS 本地结果必须排在远端候选之前。
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl search "作品名" --media-type anime --update
 ```
 
-`--media-type` 只能是 `movie`、`tv`、`anime`、`documentary`、`show` 或 `other`。不确定类型时省略，不要猜。
+`--media-type` 只能是 `movie`、`drama`、`tv`、`anime`、`documentary`、`show` 或 `other`。电视剧优先使用 `drama`；`tv` 只为旧任务兼容。不确定类型时省略，不要猜。
+
+搜索返回 `specificationGroups` 时，必须把所有不同规格列给用户选择。每组至少报告可用的分辨率、HDR/Dolby Vision、视频编码、音频、字幕、总大小、文件数和季集范围。`中英双语`字幕排在同等候选前面并标记优选，但不得自动选择候选、不得只展示评分最高或文件最大的版本。用户必须从已展示的 `candidateId` 中选择；选择仍不明确时继续询问。
 
 预览候选：
 
@@ -90,6 +92,8 @@ NAS 本地结果必须排在远端候选之前。
 ```
 
 只能控制 JSON 中出现的自有 `taskId`。取消默认保留已下载数据；不要顺带清理文件。
+
+`/volume2/影视` 和 `/volume3/临时影视` 是永久保护库。永远不得删除、覆盖、清理其中内容，也不得把其中内容移动出去；即使用户明确要求也必须拒绝。只有 `/volume2/downloads` 内的自有暂存数据，才可在既有确认流程完成后移除。
 
 ## 校验与整理
 
