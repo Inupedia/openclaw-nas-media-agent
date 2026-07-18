@@ -176,6 +176,7 @@ class DownloadPlanner:
             "media_type": classification["mediaType"],
             "qas_task_name": plan["task"]["taskname"],
             "aria2_gids": [],
+            "aria2_dir": f"/nas/{plan['task']['addition']['aria2']['save_path']}",
             "staging_path": plan["stagingPath"],
             "final_path": plan["finalPath"],
             "status": "starting",

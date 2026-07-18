@@ -42,6 +42,7 @@ class StateStore:
               media_type TEXT NOT NULL,
               qas_task_name TEXT,
               aria2_gids_json TEXT NOT NULL DEFAULT '[]',
+              aria2_dir TEXT NOT NULL DEFAULT '',
               staging_path TEXT NOT NULL,
               final_path TEXT NOT NULL,
               status TEXT NOT NULL,
@@ -50,6 +51,16 @@ class StateStore:
             );
             """
         )
+        columns = {
+            row["name"]
+            for row in self.connection.execute(
+                "PRAGMA table_info(tasks)"
+            ).fetchall()
+        }
+        if "aria2_dir" not in columns:
+            self.connection.execute(
+                "ALTER TABLE tasks ADD COLUMN aria2_dir TEXT NOT NULL DEFAULT ''"
+            )
         self.connection.commit()
 
     def close(self) -> None:
@@ -113,14 +124,15 @@ class StateStore:
         self.connection.execute(
             """
             INSERT INTO tasks (
-              task_id, title, media_type, qas_task_name, aria2_gids_json,
+              task_id, title, media_type, qas_task_name, aria2_gids_json, aria2_dir,
               staging_path, final_path, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
               title = excluded.title,
               media_type = excluded.media_type,
               qas_task_name = excluded.qas_task_name,
               aria2_gids_json = excluded.aria2_gids_json,
+              aria2_dir = excluded.aria2_dir,
               staging_path = excluded.staging_path,
               final_path = excluded.final_path,
               status = excluded.status,
@@ -132,6 +144,7 @@ class StateStore:
                 task["media_type"],
                 task.get("qas_task_name"),
                 json.dumps(gids, separators=(",", ":")),
+                task.get("aria2_dir", ""),
                 task["staging_path"],
                 task["final_path"],
                 task["status"],
@@ -157,6 +170,7 @@ class StateStore:
                 "media_type": row["media_type"],
                 "qas_task_name": row["qas_task_name"],
                 "aria2_gids": json.loads(row["aria2_gids_json"]),
+                "aria2_dir": row["aria2_dir"],
                 "staging_path": row["staging_path"],
                 "final_path": row["final_path"],
                 "status": row["status"],
@@ -165,3 +179,13 @@ class StateStore:
             }
             for row in rows
         ]
+
+    def get_task(self, task_id: str) -> dict | None:
+        return next(
+            (
+                task
+                for task in self.list_tasks()
+                if task["task_id"] == task_id
+            ),
+            None,
+        )
