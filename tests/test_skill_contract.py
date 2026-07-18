@@ -25,7 +25,10 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(trigger, self.frontmatter)
 
     def test_skill_exposes_only_fixed_mediactl(self):
-        self.assertIn("/volume4/openclaw/bin/mediactl", self.content)
+        self.assertIn(
+            "/root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl",
+            self.content,
+        )
         for forbidden in (
             "python3 ",
             "curl ",
