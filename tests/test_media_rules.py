@@ -122,6 +122,7 @@ class NamingTests(unittest.TestCase):
             paths["aria2_save_path"],
             "downloads/.incoming/rd-123",
         )
+        self.assertEqual(paths["cloud_path"], "/OpenClaw/Movies/rd-123")
 
 
 class CandidateScoreTests(unittest.TestCase):

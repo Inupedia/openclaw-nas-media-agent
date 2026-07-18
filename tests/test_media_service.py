@@ -10,6 +10,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from media_service import MediaService
 from pansou_client import PanSouError
+from jiaofu_client import JiaofuError
 from state_store import StateStore
 
 
@@ -45,6 +46,46 @@ class RecordingQas:
         self.reads.append(("share_preview", url))
         return self.get_share(url, show_all=True)
 
+    def get_share_tree(self, url, **kwargs):
+        self.reads.append(("share_tree", url))
+        root = self.get_share(url, show_all=True)
+        items = list(root.get("list") or [])
+        tree = []
+        videos = 0
+        files = 0
+        directories = 0
+        for item in items:
+            is_dir = bool(item.get("dir"))
+            name = str(item.get("file_name") or "")
+            node = {
+                "name": name,
+                "isDirectory": is_dir,
+                "size": int(item.get("size") or 0),
+                "fid": item.get("fid"),
+                "path": name,
+                "depth": 0,
+                "children": [],
+            }
+            tree.append(node)
+            if is_dir:
+                directories += 1
+            else:
+                files += 1
+                if name.casefold().endswith((".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")):
+                    videos += 1
+        return {
+            "share": root.get("share") or {},
+            "tree": tree,
+            "stats": {
+                "directories": directories,
+                "files": files,
+                "videos": videos,
+                "truncated": False,
+                "requests": 1,
+                "nodes": len(tree),
+            },
+        }
+
     def add_task(self, task):
         self.writes.append(("add", task))
 
@@ -54,6 +95,22 @@ class RecordingQas:
 
 class RecordingPanSou:
     def __init__(self, candidates=None, error=None, max_candidates=50):
+        self.candidates = candidates or []
+        self.error = error
+        self.reads = []
+        self.max_candidates = max_candidates
+
+    def search(self, query):
+        self.reads.append(query)
+        if self.error:
+            raise self.error
+        if isinstance(self.candidates, dict):
+            return list(self.candidates.get(query, []))
+        return list(self.candidates)
+
+
+class RecordingJiaofu:
+    def __init__(self, candidates=None, error=None, max_candidates=20):
         self.candidates = candidates or []
         self.error = error
         self.reads = []
@@ -405,6 +462,56 @@ class MediaServiceTests(unittest.TestCase):
         stored = self.store.get_candidate(candidate_id)
         self.assertEqual(stored["details"]["share"]["title"], "沙丘2 2024")
 
+    def test_tree_assigns_opaque_node_ids_without_share_url(self):
+        url = "https://pan.quark.cn/s/secret-share"
+        share = {
+            "share": {"title": "幼女战记合集"},
+            "list": [
+                {
+                    "file_name": "第二季",
+                    "dir": True,
+                    "fid": "s02",
+                    "size": 0,
+                },
+                {
+                    "file_name": "Youjo.S02E01.mkv",
+                    "dir": False,
+                    "fid": "e1",
+                    "size": 1000,
+                },
+            ],
+        }
+        qas = RecordingQas(
+            candidates=[{"taskname": "幼女战记2", "shareurl": url}],
+            shares={url: share},
+        )
+        service = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "幼女战记2", "matches": []}),
+            qas,
+            self.store,
+        )
+        candidate_id = service.search("幼女战记2", "anime")["data"][
+            "remoteCandidates"
+        ][0]["candidateId"]
+
+        result = service.tree(candidate_id)
+        serialized = json.dumps(result, ensure_ascii=False)
+        self.assertEqual(result["nextAction"], "choose_tree_nodes")
+        self.assertNotIn(url, serialized)
+        self.assertNotIn('"fid"', serialized)
+        tree = result["data"]["tree"]
+        self.assertTrue(all(node["nodeId"].startswith("n-") for node in tree))
+        stored = self.store.get_candidate(candidate_id)
+        self.assertIn("treeIndex", stored)
+        file_node = next(
+            node for node in tree if not node["isDirectory"]
+        )
+        selected = service.resolve_tree_selection(
+            candidate_id,
+            [file_node["nodeId"]],
+        )
+        self.assertEqual(selected, ["Youjo.S02E01.mkv"])
+
     def test_update_returns_only_episode_missing_from_nas(self):
         url = "https://pan.quark.cn/s/show"
         qas = RecordingQas(
@@ -488,6 +595,111 @@ class MediaServiceTests(unittest.TestCase):
         self.assertEqual(result["nextAction"], "already_up_to_date")
         self.assertEqual(result["data"]["remoteCandidates"], [])
         self.assertEqual(qas.writes, [])
+
+    def test_jiaofu_hits_skip_qas_and_pansou_discovery(self):
+        url = "https://pan.quark.cn/s/jiaofu-hit"
+        jiaofu = RecordingJiaofu(
+            [{"taskname": "幼女战记 第二季", "shareurl": url}]
+        )
+        qas = RecordingQas(
+            candidates=[{"taskname": "should not use", "shareurl": "https://pan.quark.cn/s/qas"}],
+            shares={
+                url: {
+                    "share": {"title": "幼女战记 第二季", "size": 1000},
+                    "list": [
+                        {
+                            "file_name": "幼女战记.S02E01.1080p.mkv",
+                            "size": 1_000,
+                        }
+                    ],
+                }
+            },
+        )
+        pansou = RecordingPanSou(
+            [{"taskname": "should not use", "shareurl": "https://pan.quark.cn/s/pansou"}]
+        )
+
+        result = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "幼女战记2", "matches": []}),
+            qas,
+            self.store,
+            pansou,
+            jiaofu,
+        ).search("幼女战记2", "anime")
+
+        self.assertEqual(result["data"]["candidateCount"], 1)
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["discoverySources"],
+            ["jiaofu"],
+        )
+        self.assertEqual(pansou.reads, [])
+        self.assertEqual(
+            [read[1] for read in qas.reads if read[0] == "search"],
+            [],
+        )
+        self.assertTrue(
+            any(read[0] == "share_preview" for read in qas.reads)
+            or any(read[0] == "share" for read in qas.reads)
+        )
+
+    def test_jiaofu_empty_falls_back_to_qas_pansou(self):
+        url = "https://pan.quark.cn/s/fallback"
+        jiaofu = RecordingJiaofu([])
+        qas = RecordingQas(
+            candidates=[{"taskname": "QAS title", "shareurl": url}],
+            shares={
+                url: {
+                    "share": {"title": "Example"},
+                    "list": [{"file_name": "Example.1080p.mkv", "size": 1_000}],
+                }
+            },
+        )
+        pansou = RecordingPanSou([])
+
+        result = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "Example", "matches": []}),
+            qas,
+            self.store,
+            pansou,
+            jiaofu,
+        ).search("Example", "drama")
+
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["discoverySources"],
+            ["qas"],
+        )
+        self.assertTrue(jiaofu.reads)
+        self.assertTrue(
+            any(read[0] == "search" for read in qas.reads)
+        )
+
+    def test_jiaofu_failure_falls_back_with_warning(self):
+        url = "https://pan.quark.cn/s/qas-result"
+        jiaofu = RecordingJiaofu(error=JiaofuError("login required"))
+        qas = RecordingQas(
+            candidates=[{"taskname": "QAS title", "shareurl": url}],
+            shares={
+                url: {
+                    "share": {"title": "Example"},
+                    "list": [{"file_name": "Example.1080p.mkv", "size": 1_000}],
+                }
+            },
+        )
+        pansou = RecordingPanSou([])
+
+        result = MediaService(
+            FakeCatalog({"found": False, "queryTitle": "Example", "matches": []}),
+            qas,
+            self.store,
+            pansou,
+            jiaofu,
+        ).search("Example", "drama")
+
+        self.assertEqual(result["data"]["warnings"], ["jiaofu_unavailable"])
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["discoverySources"],
+            ["qas"],
+        )
 
 
 if __name__ == "__main__":

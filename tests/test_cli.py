@@ -226,9 +226,10 @@ class ResourceAgentTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             runtime = _load_runtime()
 
-        self.assertEqual(len(runtime), 6)
+        self.assertEqual(len(runtime), 7)
         pansou = runtime[5]
         self.assertEqual(pansou.max_candidates, 25)
+        self.assertIsNone(runtime[6])
         self.assertNotIn(environment["PANSOU_BASE_URL"], repr(pansou))
         runtime[1].close()
 

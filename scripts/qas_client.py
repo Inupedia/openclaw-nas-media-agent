@@ -12,7 +12,44 @@ class ClientError(RuntimeError):
 
 DEFAULT_SAMPLE_MAX_DEPTH = 4
 DEFAULT_SAMPLE_MAX_REQUESTS = 4
+DEFAULT_PLAN_MAX_REQUESTS = 24
+DEFAULT_PLAN_MAX_FILES = 80
+DEFAULT_TREE_MAX_DEPTH = 6
+DEFAULT_TREE_MAX_NODES = 200
+DEFAULT_TREE_MAX_REQUESTS = 40
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS + (".ass", ".ssa", ".srt", ".vtt")
+_DIR_BONUS = (
+    "1080",
+    "2160",
+    "720",
+    "4k",
+    "s01",
+    "s02",
+    "season",
+    "第",
+    "季",
+    "ova",
+    "mkv",
+    "mp4",
+    "anime",
+    "动画",
+    "bd",
+    "web",
+)
+_DIR_PENALTY = (
+    "小说",
+    "漫画",
+    "comic",
+    "manga",
+    "mobi",
+    "epub",
+    "pdf",
+    "扫码",
+    "群",
+    "剧场",
+    "gekijouban",
+)
 
 
 def share_url_for_directory(share_url: str, pdir_fid: str) -> str:
@@ -27,6 +64,31 @@ def share_url_for_directory(share_url: str, pdir_fid: str) -> str:
 def _is_video_item(item: dict) -> bool:
     name = str(item.get("file_name") or "").casefold()
     return bool(name) and name.endswith(VIDEO_EXTENSIONS)
+
+
+def _is_media_item(item: dict) -> bool:
+    name = str(item.get("file_name") or "").casefold()
+    return bool(name) and name.endswith(MEDIA_EXTENSIONS)
+
+
+def _dir_priority(item: dict) -> int:
+    name = str(item.get("file_name") or "").casefold()
+    score = 0
+    for token in _DIR_BONUS:
+        if token in name:
+            score += 3
+    for token in _DIR_PENALTY:
+        if token in name:
+            score -= 5
+    return score
+
+
+def _pick_dir(dirs: list[dict], picker: random.Random) -> dict:
+    if not dirs:
+        raise ValueError("empty dirs")
+    ranked = sorted(dirs, key=_dir_priority, reverse=True)
+    top = ranked[: min(3, len(ranked))]
+    return picker.choice(top)
 
 
 class QasClient:
@@ -180,7 +242,7 @@ class QasClient:
             and requests_used < max_requests
             and not any(_is_video_item(item) for item in sample_files)
         ):
-            chosen = picker.choice(current_dirs)
+            chosen = _pick_dir(current_dirs, picker)
             fid = str(chosen.get("fid") or "").strip()
             if not fid:
                 break
@@ -204,8 +266,10 @@ class QasClient:
             ]
             page_files = [item for item in page_items if not item.get("dir")]
             page_dirs = [item for item in page_items if item.get("dir") and item.get("fid")]
-            sample_files.extend(page_files)
-            if any(_is_video_item(item) for item in page_files):
+            # Prefer keeping video samples; ignore pure ebook/image noise when videos exist deeper.
+            page_videos = [item for item in page_files if _is_video_item(item)]
+            sample_files.extend(page_videos or page_files)
+            if page_videos:
                 break
             current_dirs = page_dirs
 
@@ -233,6 +297,237 @@ class QasClient:
             "sampleFiles": len(sample_files),
         }
         return previewed
+
+    def get_share_for_download(
+        self,
+        share_url: str,
+        *,
+        max_requests: int = DEFAULT_PLAN_MAX_REQUESTS,
+        max_files: int = DEFAULT_PLAN_MAX_FILES,
+    ) -> dict:
+        """BFS folders until enough video/subtitle files are collected for planning."""
+        root = self.get_share(share_url, show_all=True)
+        if not isinstance(root, dict):
+            return {"list": []}
+
+        stoken = root.get("stoken") if isinstance(root.get("stoken"), str) else None
+        root_items = [
+            item for item in list(root.get("list") or []) if isinstance(item, dict)
+        ]
+        media_files: list[dict] = [
+            item
+            for item in root_items
+            if not item.get("dir") and _is_media_item(item)
+        ]
+        queue = sorted(
+            [
+                item
+                for item in root_items
+                if item.get("dir") and item.get("fid")
+            ],
+            key=_dir_priority,
+            reverse=True,
+        )
+        seen_dirs = {
+            str(item.get("fid"))
+            for item in queue
+            if item.get("fid") is not None
+        }
+        requests_used = 1
+
+        while queue and requests_used < max_requests and len(media_files) < max_files:
+            current = queue.pop(0)
+            fid = str(current.get("fid") or "").strip()
+            if not fid:
+                continue
+            try:
+                page = self.get_share(
+                    share_url,
+                    show_all=True,
+                    stoken=stoken,
+                    pdir_fid=fid,
+                )
+            except ClientError:
+                continue
+            requests_used += 1
+            if isinstance(page, dict) and isinstance(page.get("stoken"), str) and not stoken:
+                stoken = page.get("stoken")
+            page_items = [
+                item
+                for item in list((page or {}).get("list") or [])
+                if isinstance(item, dict) and item.get("file_name")
+            ]
+            for item in page_items:
+                if item.get("dir") and item.get("fid"):
+                    key = str(item.get("fid"))
+                    if key not in seen_dirs:
+                        seen_dirs.add(key)
+                        queue.append(item)
+                        queue.sort(key=_dir_priority, reverse=True)
+                elif not item.get("dir") and _is_media_item(item):
+                    media_files.append(item)
+                    if len(media_files) >= max_files:
+                        break
+
+        merged = list(root_items)
+        seen_fids = {
+            str(item.get("fid"))
+            for item in merged
+            if item.get("fid") is not None
+        }
+        for item in media_files:
+            key = str(item.get("fid")) if item.get("fid") is not None else None
+            if key and key in seen_fids:
+                continue
+            if key:
+                seen_fids.add(key)
+            merged.append(item)
+
+        result = dict(root)
+        result["list"] = merged
+        result["preview"] = {
+            "mode": "download_bfs",
+            "requests": requests_used,
+            "sampleFiles": len(media_files),
+        }
+        return result
+
+    def get_share_tree(
+        self,
+        share_url: str,
+        *,
+        max_depth: int = DEFAULT_TREE_MAX_DEPTH,
+        max_nodes: int = DEFAULT_TREE_MAX_NODES,
+        max_requests: int = DEFAULT_TREE_MAX_REQUESTS,
+    ) -> dict:
+        """BFS expand a share into a nested directory tree (bounded)."""
+        root = self.get_share(share_url, show_all=True)
+        if not isinstance(root, dict):
+            return {
+                "share": {},
+                "tree": [],
+                "stats": {
+                    "directories": 0,
+                    "files": 0,
+                    "videos": 0,
+                    "truncated": False,
+                    "requests": 0,
+                },
+            }
+
+        stoken = root.get("stoken") if isinstance(root.get("stoken"), str) else None
+        root_items = [
+            item
+            for item in list(root.get("list") or [])
+            if isinstance(item, dict) and item.get("file_name")
+        ]
+
+        def make_node(item: dict, path: str, depth: int) -> dict:
+            name = str(item.get("file_name") or "")
+            is_dir = bool(item.get("dir"))
+            node_path = f"{path}/{name}" if path else name
+            return {
+                "name": name,
+                "isDirectory": is_dir,
+                "size": int(item.get("size") or 0),
+                "fid": str(item.get("fid") or "").strip() or None,
+                "path": node_path,
+                "depth": depth,
+                "children": [],
+            }
+
+        tree: list[dict] = []
+        # queue entries: (node_dict, depth)
+        queue: list[tuple[dict, int]] = []
+        node_count = 0
+        dir_count = 0
+        file_count = 0
+        video_count = 0
+        truncated = False
+        requests_used = 1
+
+        for item in root_items:
+            if node_count >= max_nodes:
+                truncated = True
+                break
+            node = make_node(item, "", 0)
+            tree.append(node)
+            node_count += 1
+            if node["isDirectory"]:
+                dir_count += 1
+                if node["fid"]:
+                    queue.append((node, 0))
+            else:
+                file_count += 1
+                if _is_video_item(item):
+                    video_count += 1
+
+        while queue and requests_used < max_requests and node_count < max_nodes:
+            parent, depth = queue.pop(0)
+            if depth >= max_depth:
+                truncated = True
+                continue
+            fid = parent.get("fid")
+            if not fid:
+                continue
+            try:
+                page = self.get_share(
+                    share_url,
+                    show_all=True,
+                    stoken=stoken,
+                    pdir_fid=fid,
+                )
+            except ClientError:
+                truncated = True
+                continue
+            requests_used += 1
+            if (
+                isinstance(page, dict)
+                and isinstance(page.get("stoken"), str)
+                and not stoken
+            ):
+                stoken = page.get("stoken")
+            page_items = [
+                item
+                for item in list((page or {}).get("list") or [])
+                if isinstance(item, dict) and item.get("file_name")
+            ]
+            for item in page_items:
+                if node_count >= max_nodes:
+                    truncated = True
+                    break
+                child = make_node(item, parent["path"], depth + 1)
+                parent["children"].append(child)
+                node_count += 1
+                if child["isDirectory"]:
+                    dir_count += 1
+                    if child["fid"] and depth + 1 < max_depth:
+                        queue.append((child, depth + 1))
+                    elif child["fid"]:
+                        truncated = True
+                else:
+                    file_count += 1
+                    if _is_video_item(item):
+                        video_count += 1
+            if node_count >= max_nodes:
+                truncated = True
+                break
+
+        if queue:
+            truncated = True
+
+        return {
+            "share": root.get("share") if isinstance(root.get("share"), dict) else {},
+            "tree": tree,
+            "stats": {
+                "directories": dir_count,
+                "files": file_count,
+                "videos": video_count,
+                "truncated": truncated,
+                "requests": requests_used,
+                "nodes": node_count,
+            },
+        }
 
     def add_task(self, task: dict) -> dict:
         return self._request(

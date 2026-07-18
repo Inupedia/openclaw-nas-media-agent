@@ -11,16 +11,19 @@ from media_classifier import (
 )
 from output_contract import success
 from pansou_client import PanSouError, normalize_quark_url, query_variants
-from qas_client import ClientError
+from jiaofu_client import JiaofuError
+from qas_client import ClientError, MEDIA_EXTENSIONS
 from state_store import StateStore
+import hashlib
 
 
 class MediaService:
-    def __init__(self, catalog, qas, store: StateStore, pansou=None):
+    def __init__(self, catalog, qas, store: StateStore, pansou=None, jiaofu=None):
         self.catalog = catalog
         self.qas = qas
         self.store = store
         self.pansou = pansou
+        self.jiaofu = jiaofu
 
     def search(
         self,
@@ -263,9 +266,53 @@ class MediaService:
         )
 
     def _discover_candidates(self, query: str) -> tuple[list[dict], list[str]]:
+        warnings = []
+        jiaofu_hits = self._discover_jiaofu(query, warnings)
+        if jiaofu_hits:
+            return jiaofu_hits, warnings
+        return self._discover_qas_pansou(query, warnings), warnings
+
+    def _discover_jiaofu(
+        self,
+        query: str,
+        warnings: list[str],
+    ) -> list[dict]:
+        if self.jiaofu is None:
+            return []
+        discovered = []
+        by_share: dict[str, dict] = {}
+        try:
+            for variant in query_variants(query):
+                for raw_candidate in self.jiaofu.search(variant):
+                    candidate = dict(raw_candidate)
+                    share_url = candidate.get("shareurl") or candidate.get("url")
+                    normalized = normalize_quark_url(share_url)
+                    key = normalized or str(share_url or "").strip()
+                    if not key:
+                        continue
+                    existing = by_share.get(key)
+                    if existing:
+                        if "jiaofu" not in existing["_discoverySources"]:
+                            existing["_discoverySources"].append("jiaofu")
+                        continue
+                    if normalized:
+                        candidate["shareurl"] = normalized
+                        candidate.pop("url", None)
+                    candidate["_discoverySources"] = ["jiaofu"]
+                    by_share[key] = candidate
+                    discovered.append(candidate)
+        except JiaofuError:
+            warnings.append("jiaofu_unavailable")
+            return []
+        return discovered
+
+    def _discover_qas_pansou(
+        self,
+        query: str,
+        warnings: list[str],
+    ) -> list[dict]:
         discovered = []
         by_share = {}
-        warnings = []
         pansou_available = self.pansou is not None
         pansou_keys = set()
         pansou_limit = int(
@@ -311,7 +358,7 @@ class MediaService:
                     by_share[key] = candidate
                     discovered.append(candidate)
 
-        return discovered, warnings
+        return discovered
 
     @staticmethod
     def _serialize_episodes(
@@ -449,3 +496,130 @@ class MediaService:
             terminal=False,
             next_action="plan_or_choose",
         )
+
+    def tree(self, candidate_id: str) -> dict:
+        candidate = self.store.get_candidate(candidate_id)
+        try:
+            raw = self.qas.get_share_tree(candidate["shareurl"])
+        except ClientError as error:
+            raise ClientError(str(error)) from None
+
+        public_tree, index = self._assign_tree_node_ids(raw.get("tree") or [])
+        stats = dict(raw.get("stats") or {})
+        share = raw.get("share") if isinstance(raw.get("share"), dict) else {}
+
+        # Flatten media list into details for later classification hints.
+        media_list = [
+            {
+                "file_name": entry["name"],
+                "dir": False,
+                "size": entry.get("size") or 0,
+            }
+            for entry in index.values()
+            if not entry.get("isDirectory")
+            and str(entry.get("name") or "").casefold().endswith(MEDIA_EXTENSIONS)
+        ]
+        updated = dict(candidate)
+        updated["treeIndex"] = index
+        updated["details"] = {
+            "share": share,
+            "list": media_list,
+            "treeStats": stats,
+        }
+        self.store.update_candidate(candidate_id, updated)
+
+        return success(
+            {
+                "candidateId": candidate_id,
+                "title": str(
+                    share.get("title")
+                    or candidate.get("candidate", {}).get("taskname")
+                    or "未命名候选"
+                ),
+                "tree": public_tree,
+                "stats": {
+                    "directories": int(stats.get("directories") or 0),
+                    "files": int(stats.get("files") or 0),
+                    "videos": int(stats.get("videos") or 0),
+                    "truncated": bool(stats.get("truncated")),
+                    "nodes": int(stats.get("nodes") or len(index)),
+                },
+            },
+            terminal=False,
+            next_action="choose_tree_nodes",
+        )
+
+    @staticmethod
+    def _assign_tree_node_ids(raw_nodes: list) -> tuple[list[dict], dict]:
+        index: dict[str, dict] = {}
+        counter = 0
+
+        def walk(nodes: list, parent_id: str | None = None) -> list[dict]:
+            nonlocal counter
+            public = []
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                counter += 1
+                seed = f"{node.get('path')}|{node.get('fid')}|{counter}"
+                node_id = "n-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+                children_raw = list(node.get("children") or [])
+                children_public = walk(children_raw, node_id)
+                child_ids = [child["nodeId"] for child in children_public]
+                is_dir = bool(node.get("isDirectory"))
+                name = str(node.get("name") or "")
+                media_names: list[str] = []
+                if is_dir:
+                    for child_id in child_ids:
+                        media_names.extend(index[child_id].get("mediaNames") or [])
+                elif name.casefold().endswith(MEDIA_EXTENSIONS):
+                    media_names = [name]
+                index[node_id] = {
+                    "nodeId": node_id,
+                    "name": name,
+                    "isDirectory": is_dir,
+                    "size": int(node.get("size") or 0),
+                    "path": str(node.get("path") or name),
+                    "parentId": parent_id,
+                    "childIds": child_ids,
+                    "mediaNames": media_names,
+                    # fid kept only in store for possible future deep ops; never returned
+                    "fid": node.get("fid"),
+                }
+                public.append(
+                    {
+                        "nodeId": node_id,
+                        "name": name,
+                        "isDirectory": is_dir,
+                        "size": int(node.get("size") or 0),
+                        "children": children_public,
+                    }
+                )
+            return public
+
+        return walk(list(raw_nodes or [])), index
+
+    def resolve_tree_selection(
+        self,
+        candidate_id: str,
+        node_ids: list[str],
+    ) -> list[str]:
+        candidate = self.store.get_candidate(candidate_id)
+        index = candidate.get("treeIndex")
+        if not isinstance(index, dict) or not index:
+            raise ValueError("candidate tree missing; run tree first")
+        selected: list[str] = []
+        seen: set[str] = set()
+        for raw_id in node_ids:
+            node_id = str(raw_id or "").strip()
+            entry = index.get(node_id)
+            if not entry:
+                raise ValueError(f"unknown tree node: {node_id}")
+            for name in entry.get("mediaNames") or []:
+                key = str(name)
+                if key and key not in seen:
+                    seen.add(key)
+                    selected.append(key)
+        if not selected:
+            raise ValueError("selected nodes contain no media files")
+        return sorted(selected, key=str.casefold)

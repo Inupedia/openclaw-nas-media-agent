@@ -46,8 +46,10 @@ def build_paths(classification, routing: dict, task_id: str) -> dict:
     directory = classification.title
     if classification.year:
         directory = f"{directory} ({classification.year})"
+    # Quark rejects non-ASCII / spaces in cloud folder names ("illegal text").
+    cloud_dir = re.sub(r"[^A-Za-z0-9._-]+", "-", str(task_id)).strip("-._") or "task"
     return {
-        "cloud_path": f"{route['cloud_prefix'].rstrip('/')}/{directory}",
+        "cloud_path": f"{route['cloud_prefix'].rstrip('/')}/{cloud_dir}",
         "staging_path": f"{route['staging_root'].rstrip('/')}/{task_id}",
         "final_path": f"{route['final_root'].rstrip('/')}/{directory}",
         "aria2_save_path": f"{route['aria2_prefix'].rstrip('/')}/{task_id}",

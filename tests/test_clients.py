@@ -182,6 +182,70 @@ class QasClientTests(unittest.TestCase):
         self.assertLessEqual(result["preview"]["requests"], 4)
         self.assertEqual(result["share"]["file_only_num"], 327)
 
+    def test_get_share_tree_expands_nested_directories(self):
+        root_url = "https://pan.quark.cn/s/youjo"
+        responses = {
+            root_url: {
+                "success": True,
+                "data": {
+                    "share": {"title": "幼女战记合集"},
+                    "stoken": "st",
+                    "list": [
+                        {
+                            "file_name": "第二季",
+                            "dir": True,
+                            "fid": "s02",
+                        },
+                        {
+                            "file_name": "剧场版",
+                            "dir": True,
+                            "fid": "movie",
+                        },
+                    ],
+                },
+            },
+            f"{root_url}#/list/share/s02": {
+                "success": True,
+                "data": {
+                    "list": [
+                        {
+                            "file_name": "Youjo.S02E01.mkv",
+                            "dir": False,
+                            "size": 10,
+                            "fid": "e1",
+                        }
+                    ],
+                },
+            },
+            f"{root_url}#/list/share/movie": {
+                "success": True,
+                "data": {
+                    "list": [
+                        {
+                            "file_name": "Gekijouban.mkv",
+                            "dir": False,
+                            "size": 20,
+                            "fid": "m1",
+                        }
+                    ],
+                },
+            },
+        }
+
+        def opener(request, timeout=30):
+            body = json.loads(request.data)
+            return FakeResponse(responses[body["shareurl"]])
+
+        client = QasClient("http://nas:5005", "token", opener=opener)
+        result = client.get_share_tree(root_url)
+
+        names = {node["name"] for node in result["tree"]}
+        self.assertEqual(names, {"第二季", "剧场版"})
+        s02 = next(node for node in result["tree"] if node["name"] == "第二季")
+        self.assertEqual(s02["children"][0]["name"], "Youjo.S02E01.mkv")
+        self.assertEqual(result["stats"]["videos"], 2)
+        self.assertFalse(result["stats"]["truncated"])
+
     def test_http_error_never_contains_token(self):
         error = urllib.error.HTTPError(
             "http://nas:5005/data?token=top-secret",

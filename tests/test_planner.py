@@ -88,7 +88,7 @@ class PlannerTests(unittest.TestCase):
             result["stagingPath"].rsplit("/", 1)[0],
             "/volume2/downloads/.incoming",
         )
-        self.assertEqual(task["savepath"], "/OpenClaw/Movies/沙丘2 (2024)")
+        self.assertRegex(task["savepath"], r"^/OpenClaw/Movies/rd-[a-f0-9]{12}$")
         self.assertEqual(
             task["addition"]["aria2"]["save_path"].split("/")[0],
             "downloads",
@@ -301,13 +301,24 @@ class PlannerTests(unittest.TestCase):
                         {"file_name": "Show.S01E120.mkv", "dir": False},
                     ],
                 },
-                "selectedFiles": ["Show.S01E120.mkv"],
+                "treeIndex": {
+                    "n-ep120": {
+                        "nodeId": "n-ep120",
+                        "name": "Show.S01E120.mkv",
+                        "isDirectory": False,
+                        "mediaNames": ["Show.S01E120.mkv"],
+                        "path": "Show.S01E120.mkv",
+                    }
+                },
                 "existingEpisodes": [{"season": 1, "episode": 119}],
                 "newEpisodes": [{"season": 1, "episode": 120}],
             }
         )
 
-        result = self.make_planner(qas).plan_selected(candidate_id)
+        result = self.make_planner(qas).plan_selected(
+            candidate_id,
+            node_ids=["n-ep120"],
+        )
 
         serialized = json.dumps(result, ensure_ascii=False)
         self.assertNotIn(url, serialized)
@@ -316,9 +327,107 @@ class PlannerTests(unittest.TestCase):
             result["incremental"]["newEpisodes"],
             [{"season": 1, "episode": 120}],
         )
+        self.assertRegex(result["cloudPath"], r"/OpenClaw/.+/rd-[a-f0-9]{12}$")
         stored = self.store.read_plan(result["planId"], "download")
         self.assertRegex("Show.S01E120.mkv", stored["task"]["pattern"])
         self.assertNotRegex("Show.S01E119.mkv", stored["task"]["pattern"])
+
+    def test_plan_selected_requires_tree_nodes(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Show",
+                "shareurl": "https://pan.quark.cn/s/show",
+                "candidate": {"taskname": "Show"},
+                "details": {"share": {"title": "Show"}, "list": []},
+            }
+        )
+        with self.assertRaisesRegex(PlanningError, "selection_required"):
+            self.make_planner(FakeQas()).plan_selected(candidate_id)
+
+    def test_plan_selected_expands_directory_node(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "幼女战记2",
+                "shareurl": "https://pan.quark.cn/s/show",
+                "candidate": {"taskname": "幼女战记2"},
+                "details": {"share": {"title": "幼女战记2"}, "list": []},
+                "treeIndex": {
+                    "n-s02": {
+                        "nodeId": "n-s02",
+                        "name": "第二季",
+                        "isDirectory": True,
+                        "mediaNames": [
+                            "Youjo.S02E01.mkv",
+                            "Youjo.S02E02.mkv",
+                        ],
+                        "path": "第二季",
+                        "fid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    },
+                    "n-movie": {
+                        "nodeId": "n-movie",
+                        "name": "Gekijouban.mkv",
+                        "isDirectory": False,
+                        "mediaNames": ["Gekijouban.mkv"],
+                        "path": "Gekijouban.mkv",
+                    },
+                },
+            }
+        )
+        result = self.make_planner(FakeQas()).plan_selected(
+            candidate_id,
+            node_ids=["n-s02"],
+        )
+        self.assertEqual(
+            result["incremental"]["selectedFiles"],
+            ["Youjo.S02E01.mkv", "Youjo.S02E02.mkv"],
+        )
+        self.assertNotIn(
+            "Gekijouban",
+            json.dumps(result, ensure_ascii=False),
+        )
+        stored = self.store.read_plan(result["planId"], "download")
+        self.assertEqual(
+            stored["task"]["shareurl"],
+            "https://pan.quark.cn/s/show#/list/share/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+
+    def test_plan_selected_file_node_deeplinks_parent_dir(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "幼女战记2",
+                "shareurl": "https://pan.quark.cn/s/abc123",
+                "candidate": {"taskname": "幼女战记2"},
+                "details": {"share": {"title": "幼女战记2"}, "list": []},
+                "treeIndex": {
+                    "n-dir": {
+                        "nodeId": "n-dir",
+                        "name": "2026 S02",
+                        "isDirectory": True,
+                        "mediaNames": ["ep01.mp4", "ep02.mp4"],
+                        "fid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    },
+                    "n-ep02": {
+                        "nodeId": "n-ep02",
+                        "name": "ep02.mp4",
+                        "isDirectory": False,
+                        "parentId": "n-dir",
+                        "mediaNames": ["ep02.mp4"],
+                        "fid": "cccccccccccccccccccccccccccccccc",
+                    },
+                },
+            }
+        )
+        result = self.make_planner(FakeQas()).plan_selected(
+            candidate_id,
+            node_ids=["n-ep02"],
+        )
+        stored = self.store.read_plan(result["planId"], "download")
+        self.assertEqual(
+            stored["task"]["shareurl"],
+            "https://pan.quark.cn/s/abc123#/list/share/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        self.assertIn(r"ep02\.mp4", stored["task"]["pattern"])
+        self.assertNotIn(r"ep01\.mp4", stored["task"]["pattern"])
 
     def test_selected_plan_execution_returns_no_raw_qas_events(self):
         url = "https://pan.quark.cn/s/movie"
@@ -330,10 +439,22 @@ class PlannerTests(unittest.TestCase):
                 "shareurl": url,
                 "candidate": {"taskname": "沙丘2 2024"},
                 "details": MOVIE_SHARE,
+                "treeIndex": {
+                    "n-movie": {
+                        "nodeId": "n-movie",
+                        "name": "沙丘2.2024.1080P.HEVC.mkv",
+                        "isDirectory": False,
+                        "mediaNames": [
+                            "沙丘2.2024.1080P.HEVC.mkv",
+                            "沙丘2.2024.zh-CN.ass",
+                        ],
+                        "path": "沙丘2.2024.1080P.HEVC.mkv",
+                    }
+                },
             }
         )
         planner = self.make_planner(qas)
-        plan = planner.plan_selected(candidate_id)
+        plan = planner.plan_selected(candidate_id, node_ids=["n-movie"])
 
         result = planner.execute(plan["planId"], confirmed=True)
 

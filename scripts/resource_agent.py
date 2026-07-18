@@ -13,6 +13,7 @@ from media_service import MediaService
 from organizer import DownloadValidator, OrganizeError, Organizer
 from output_contract import failure, success
 from pansou_client import PanSouClient
+from jiaofu_client import JiaofuClient, JiaofuError
 from path_guard import PathGuard
 from planner import DownloadPlanner, PlanningError
 from qas_client import ClientError, QasClient
@@ -45,6 +46,30 @@ def _pansou_limit(value: str | None) -> int:
     except ValueError:
         return 50
     return parsed if 1 <= parsed <= 100 else 50
+
+
+def _jiaofu_limit(value: str | None) -> int:
+    try:
+        parsed = int(value or "20")
+    except ValueError:
+        return 20
+    return parsed if 1 <= parsed <= 50 else 20
+
+
+def _optional_jiaofu(base_dir: Path):
+    del base_dir  # reserved for future relative-path resolution
+    state = os.environ.get("JIAOFU_STORAGE_STATE", "").strip()
+    if not state:
+        return None
+    try:
+        return JiaofuClient(
+            state,
+            max_candidates=_jiaofu_limit(
+                os.environ.get("JIAOFU_MAX_CANDIDATES")
+            ),
+        )
+    except JiaofuError:
+        return None
 
 
 class ResourceAgent:
@@ -240,6 +265,7 @@ def _load_runtime():
             os.environ.get("PANSOU_MAX_CANDIDATES")
         ),
     )
+    jiaofu = _optional_jiaofu(base_dir)
     aria = Aria2Client(
         os.environ["ARIA2_RPC_URL"],
         os.environ["ARIA2_RPC_SECRET"],
@@ -249,7 +275,7 @@ def _load_runtime():
         store=store,
         routing=routing,
     )
-    return routing, store, qas, aria, planner, pansou
+    return routing, store, qas, aria, planner, pansou, jiaofu
 
 
 def parse_args(argv) -> argparse.Namespace:
@@ -281,10 +307,19 @@ def parse_args(argv) -> argparse.Namespace:
     search.add_argument("--update", action="store_true")
     preview = subparsers.add_parser("preview")
     preview.add_argument("candidate_id")
+    tree = subparsers.add_parser("tree")
+    tree.add_argument("candidate_id")
     plan = subparsers.add_parser("plan")
     plan_sub = plan.add_subparsers(dest="plan_command", required=True)
     plan_download = plan_sub.add_parser("download")
     plan_download.add_argument("candidate_id")
+    plan_download.add_argument(
+        "--node",
+        action="append",
+        dest="nodes",
+        default=[],
+        help="tree nodeId selected via mediactl tree (repeatable)",
+    )
     execute = subparsers.add_parser("execute")
     execute.add_argument("plan_id")
     execute.add_argument("--confirmed", action="store_true")
@@ -324,13 +359,19 @@ def emit(result: dict, *, stream=None) -> None:
     )
 
 
-def _default_service_factory(routing, store, qas, pansou):
+def _default_service_factory(routing, store, qas, pansou, jiaofu=None):
     roots = {
         media_type: Path(route["final_root"])
         for media_type, route in routing.items()
         if isinstance(route, dict) and route.get("final_root")
     }
-    return MediaService(LibraryCatalog(roots), qas, store, pansou)
+    return MediaService(
+        LibraryCatalog(roots),
+        qas,
+        store,
+        pansou,
+        jiaofu,
+    )
 
 
 def _ffprobe_runner(path: Path) -> bool:
@@ -401,9 +442,9 @@ def main(
     store = None
     try:
         args = parse_args(arguments)
-        routing, store, qas, aria, planner, pansou = runtime_loader()
+        routing, store, qas, aria, planner, pansou, jiaofu = runtime_loader()
         agent = ResourceAgent(store=store, qas=qas, aria=aria)
-        service = service_factory(routing, store, qas, pansou)
+        service = service_factory(routing, store, qas, pansou, jiaofu)
         if args.command == "check-ready":
             roots = [
                 Path(route["staging_root"])
@@ -442,9 +483,14 @@ def main(
             )
         elif args.command == "preview":
             result = service.preview(args.candidate_id)
+        elif args.command == "tree":
+            result = service.tree(args.candidate_id)
         elif args.command == "plan":
             result = success(
-                planner.plan_selected(args.candidate_id),
+                planner.plan_selected(
+                    args.candidate_id,
+                    node_ids=list(getattr(args, "nodes", []) or []),
+                ),
                 next_action="review_plan",
             )
         elif args.command == "execute":

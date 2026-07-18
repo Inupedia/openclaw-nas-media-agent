@@ -6,7 +6,7 @@ from typing import Callable
 from episode_diff import normalize_title_key
 from media_classifier import classify, score_candidate
 from media_namer import build_paths
-from qas_client import ClientError
+from qas_client import share_url_for_directory
 from state_store import PlanError, StateStore
 
 
@@ -20,6 +20,35 @@ INTENT_PREFIX = re.compile(r"^\s*(?:请|帮我|给我)?\s*(?:下载|追更|搜�
 
 def _clean_hint(value: str) -> str:
     return INTENT_PREFIX.sub("", value or "").strip()
+
+
+def resolve_transfer_shareurl(
+    base_shareurl: str,
+    index: dict,
+    selected_nodes: list[str],
+) -> str:
+    """Deep-link into the selected folder so QAS lists files at the right level.
+
+    Quark-auto-save only unwraps a single root folder and does not recurse unless
+    update_subdir is set. Nested season folders therefore need a share URL that
+    already points at the directory containing the selected media.
+    """
+    target_fids: list[str] = []
+    for node_id in selected_nodes:
+        entry = index.get(node_id) or {}
+        if entry.get("isDirectory"):
+            fid = str(entry.get("fid") or "").strip()
+            if fid:
+                target_fids.append(fid)
+            continue
+        parent = index.get(entry.get("parentId") or "") or {}
+        fid = str(parent.get("fid") or entry.get("fid") or "").strip()
+        if fid:
+            target_fids.append(fid)
+    unique = list(dict.fromkeys(target_fids))
+    if len(unique) != 1:
+        return str(base_shareurl or "")
+    return share_url_for_directory(base_shareurl, unique[0])
 
 
 class DownloadPlanner:
@@ -164,59 +193,77 @@ class DownloadPlanner:
         plan_id = self.store.create_plan("download", plan_payload)
         return {"planId": plan_id, **plan_payload}
 
-    def plan_selected(self, candidate_id: str) -> dict:
+    def plan_selected(
+        self,
+        candidate_id: str,
+        *,
+        node_ids: list[str] | None = None,
+    ) -> dict:
         try:
             candidate = self.store.get_candidate(candidate_id)
         except PlanError as error:
             raise PlanningError(str(error)) from None
+
+        selected_nodes = [str(item).strip() for item in (node_ids or []) if str(item).strip()]
+        if not selected_nodes:
+            raise PlanningError(
+                "selection_required: run mediactl tree and pass --node nodeId"
+            )
+
+        index = candidate.get("treeIndex")
+        if not isinstance(index, dict) or not index:
+            raise PlanningError(
+                "selection_required: run mediactl tree before planning"
+            )
+
+        selected_files: list[str] = []
+        seen: set[str] = set()
+        for node_id in selected_nodes:
+            entry = index.get(node_id)
+            if not entry:
+                raise PlanningError(f"unknown tree node: {node_id}")
+            for name in entry.get("mediaNames") or []:
+                key = str(name)
+                if key and key not in seen:
+                    seen.add(key)
+                    selected_files.append(key)
+        selected_files = sorted(selected_files, key=str.casefold)
+        if not selected_files:
+            raise PlanningError("selected nodes contain no media files")
+
         details = candidate.get("details")
         if not isinstance(details, dict):
-            raise PlanningError("candidate must be previewed before planning")
+            details = {"share": {}, "list": []}
+        # Prefer classification against the selected media only.
+        selected_details = {
+            "share": details.get("share") if isinstance(details.get("share"), dict) else {},
+            "list": [
+                {"file_name": name, "dir": False}
+                for name in selected_files
+            ],
+        }
 
         query = str(candidate.get("query", ""))
-        classification = classify(query, details)
+        classification = classify(query, selected_details)
         task_id = f"rd-{uuid.uuid4().hex[:12]}"
         paths = build_paths(classification, self.routing, task_id)
-        selected_files = list(candidate.get("selectedFiles", []))
-        if not selected_files:
-            allowed_extensions = (
-                ".mkv",
-                ".mp4",
-                ".avi",
-                ".mov",
-                ".m4v",
-                ".ts",
-                ".ass",
-                ".ssa",
-                ".srt",
-                ".vtt",
-            )
-            selected_files = [
-                str(item.get("file_name", ""))
-                for item in details.get("list", [])
-                if not item.get("dir")
-                and str(item.get("file_name", "")).lower().endswith(
-                    allowed_extensions
-                )
-            ]
-        selected_files = sorted(
-            {name for name in selected_files if name},
-            key=str.casefold,
-        )
-        if not selected_files:
-            raise PlanningError("candidate has no selectable media files")
+        pattern = "(?i)^(?:" + "|".join(
+            re.escape(name) for name in selected_files
+        ) + ")$"
 
         warnings = []
         if classification.confidence < 0.85:
             warnings.append("classification_low_confidence")
         if self.path_exists(paths["final_path"]):
             warnings.append("final_path_exists")
-        pattern = "(?i)^(?:" + "|".join(
-            re.escape(name) for name in selected_files
-        ) + ")$"
+        transfer_shareurl = resolve_transfer_shareurl(
+            str(candidate.get("shareurl") or ""),
+            index,
+            selected_nodes,
+        )
         task = {
             "taskname": classification.title,
-            "shareurl": candidate["shareurl"],
+            "shareurl": transfer_shareurl,
             "savepath": paths["cloud_path"],
             "pattern": pattern,
             "replace": "",
@@ -234,6 +281,7 @@ class DownloadPlanner:
             "existingEpisodes": list(candidate.get("existingEpisodes", [])),
             "newEpisodes": list(candidate.get("newEpisodes", [])),
             "selectedFiles": selected_files,
+            "selectedNodes": selected_nodes,
         }
         classification_data = {
             "mediaType": classification.media_type,
@@ -248,6 +296,12 @@ class DownloadPlanner:
             candidate.get("titleKey")
             or normalize_title_key(classification.title)
         )
+        updated = dict(candidate)
+        updated["selectedFiles"] = selected_files
+        updated["selectedNodes"] = selected_nodes
+        updated["details"] = selected_details
+        self.store.update_candidate(candidate_id, updated)
+
         plan_payload = {
             "schemaVersion": 1,
             "taskId": task_id,
@@ -271,6 +325,7 @@ class DownloadPlanner:
             "classification": classification_data,
             "stagingPath": paths["staging_path"],
             "finalPath": paths["final_path"],
+            "cloudPath": paths["cloud_path"],
             "incremental": incremental,
             "warnings": warnings,
             "requiresConfirmation": bool(warnings),

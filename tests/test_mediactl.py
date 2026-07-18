@@ -124,8 +124,9 @@ class MediaCtlContractTests(unittest.TestCase):
                 object(),
                 object(),
                 object(),
+                None,
             ),
-            service_factory=lambda routing, loaded_store, qas, pansou: service,
+            service_factory=lambda routing, loaded_store, qas, pansou, jiaofu=None: service,
             stream=stream,
         )
 

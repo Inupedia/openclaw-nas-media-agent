@@ -71,6 +71,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("specificationGroups", self.content)
         self.assertIn("中英双语", self.content)
         self.assertIn("不得自动选择", self.content)
+        self.assertIn("mediactl tree", self.content)
+        self.assertIn("--node", self.content)
+        self.assertIn("choose_tree_nodes", self.content)
 
     def test_skill_permanently_protects_formal_libraries(self):
         self.assertIn("/volume2/影视", self.content)
