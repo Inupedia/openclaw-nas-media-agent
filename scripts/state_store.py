@@ -36,6 +36,13 @@ class StateStore:
               consumed_at INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS candidates (
+              candidate_id TEXT PRIMARY KEY,
+              payload_json TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS tasks (
               task_id TEXT PRIMARY KEY,
               title TEXT NOT NULL,
@@ -61,6 +68,51 @@ class StateStore:
             self.connection.execute(
                 "ALTER TABLE tasks ADD COLUMN aria2_dir TEXT NOT NULL DEFAULT ''"
             )
+        self.connection.commit()
+
+    def create_candidate(
+        self,
+        payload: dict,
+        ttl_seconds: int = 900,
+    ) -> str:
+        now = int(self.clock())
+        candidate_id = f"candidate-{uuid.uuid4().hex}"
+        self.connection.execute(
+            """
+            INSERT INTO candidates
+              (candidate_id, payload_json, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                now,
+                now + ttl_seconds,
+            ),
+        )
+        self.connection.commit()
+        return candidate_id
+
+    def get_candidate(self, candidate_id: str) -> dict:
+        row = self.connection.execute(
+            "SELECT * FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise PlanError("candidate not found")
+        if row["expires_at"] < int(self.clock()):
+            raise PlanError("candidate expired")
+        return json.loads(row["payload_json"])
+
+    def update_candidate(self, candidate_id: str, payload: dict) -> None:
+        self.get_candidate(candidate_id)
+        self.connection.execute(
+            "UPDATE candidates SET payload_json = ? WHERE candidate_id = ?",
+            (
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                candidate_id,
+            ),
+        )
         self.connection.commit()
 
     def close(self) -> None:

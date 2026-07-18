@@ -84,6 +84,39 @@ class StateStoreTests(unittest.TestCase):
         self.assertNotIn("cookie", serialized)
         self.assertNotIn("secret", serialized)
 
+    def test_candidate_is_opaque_and_expires(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Example",
+                "shareurl": "https://pan.quark.cn/s/example",
+            },
+            ttl_seconds=10,
+        )
+
+        self.assertTrue(candidate_id.startswith("candidate-"))
+        self.assertEqual(
+            self.store.get_candidate(candidate_id)["query"],
+            "Example",
+        )
+        self.clock.now += 11
+        with self.assertRaisesRegex(PlanError, "candidate expired"):
+            self.store.get_candidate(candidate_id)
+
+    def test_candidate_can_be_updated_with_preview_details(self):
+        candidate_id = self.store.create_candidate(
+            {"query": "Example"},
+        )
+
+        self.store.update_candidate(
+            candidate_id,
+            {"query": "Example", "details": {"list": []}},
+        )
+
+        self.assertEqual(
+            self.store.get_candidate(candidate_id)["details"],
+            {"list": []},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
