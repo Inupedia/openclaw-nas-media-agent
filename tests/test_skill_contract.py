@@ -76,6 +76,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("永远不得删除", self.content)
         self.assertIn("不得提供手工删除命令", self.content)
         self.assertIn("不得建议放宽", self.content)
+        self.assertIn("不要提供替代删除途径或下一步", self.content)
 
 
 if __name__ == "__main__":
