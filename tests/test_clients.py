@@ -10,7 +10,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from aria2_client import Aria2Client
-from qas_client import ClientError, QasClient
+from qas_client import ClientError, QasClient, share_url_for_directory
 
 
 class FakeResponse:
@@ -69,6 +69,110 @@ class QasClientTests(unittest.TestCase):
             {"shareurl": "https://pan.quark.cn/s/example"},
         )
         self.assertEqual(result["share"]["title"], "Example")
+
+    def test_share_url_for_directory_builds_deep_link(self):
+        self.assertEqual(
+            share_url_for_directory("https://pan.quark.cn/s/abc/", "fid-1"),
+            "https://pan.quark.cn/s/abc#/list/share/fid-1",
+        )
+
+    def test_get_share_posts_stoken_and_deep_link(self):
+        opener = Mock(
+            return_value=FakeResponse(
+                {
+                    "success": True,
+                    "data": {"list": [], "stoken": "tok"},
+                }
+            )
+        )
+        client = QasClient("http://nas:5005", "token", opener=opener)
+
+        client.get_share(
+            "https://pan.quark.cn/s/example",
+            stoken="tok",
+            pdir_fid="dir-fid",
+        )
+
+        body = json.loads(opener.call_args.args[0].data)
+        self.assertEqual(
+            body["shareurl"],
+            "https://pan.quark.cn/s/example#/list/share/dir-fid",
+        )
+        self.assertEqual(body["stoken"], "tok")
+
+    def test_get_share_expanded_bfs_into_nested_dirs(self):
+        root_url = "https://pan.quark.cn/s/crime"
+        responses = {
+            root_url: {
+                "success": True,
+                "data": {
+                    "share": {"title": "犯罪心理"},
+                    "stoken": "st",
+                    "list": [
+                        {
+                            "file_name": "犯罪心理S01~S16",
+                            "dir": True,
+                            "fid": "root-dir",
+                        }
+                    ],
+                },
+            },
+            f"{root_url}#/list/share/root-dir": {
+                "success": True,
+                "data": {
+                    "stoken": "st",
+                    "list": [
+                        {"file_name": "S01", "dir": True, "fid": "s01"},
+                        {"file_name": "S02", "dir": True, "fid": "s02"},
+                    ],
+                },
+            },
+            f"{root_url}#/list/share/s01": {
+                "success": True,
+                "data": {
+                    "list": [
+                        {
+                            "file_name": "犯罪心理.S01E01.1080P.mkv",
+                            "dir": False,
+                            "size": 1,
+                        }
+                    ],
+                },
+            },
+            f"{root_url}#/list/share/s02": {
+                "success": True,
+                "data": {
+                    "list": [
+                        {
+                            "file_name": "犯罪心理.S02E01.1080P.mkv",
+                            "dir": False,
+                            "size": 1,
+                        }
+                    ],
+                },
+            },
+        }
+
+        def opener(request, timeout=30):
+            body = json.loads(request.data)
+            payload = responses[body["shareurl"]]
+            return FakeResponse(payload)
+
+        client = QasClient("http://nas:5005", "token", opener=opener)
+        result = client.get_share_expanded(root_url)
+
+        names = [
+            item["file_name"]
+            for item in result["list"]
+            if not item.get("dir")
+        ]
+        self.assertEqual(
+            names,
+            ["犯罪心理.S01E01.1080P.mkv", "犯罪心理.S02E01.1080P.mkv"],
+        )
+        self.assertTrue(result["expanded"])
+        self.assertEqual(result["expansion"]["files"], 2)
+        self.assertGreaterEqual(result["expansion"]["requests"], 3)
 
     def test_http_error_never_contains_token(self):
         error = urllib.error.HTTPError(

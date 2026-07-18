@@ -99,9 +99,18 @@ class PanSouClient:
 
         data = payload.get("data") if isinstance(payload, dict) else None
         merged = data.get("merged_by_type") if isinstance(data, dict) else None
-        items = merged.get("quark") if isinstance(merged, dict) else None
-        if not isinstance(items, list):
+        # Some live queries omit merged_by_type entirely; treat that as no
+        # Quark hits for this keyword so other query variants can still run.
+        if merged is None:
+            items = []
+        elif not isinstance(merged, dict):
             raise PanSouError("PanSou returned an invalid response") from None
+        else:
+            items = merged.get("quark")
+            if items is None:
+                items = []
+            elif not isinstance(items, list):
+                raise PanSouError("PanSou returned an invalid response") from None
 
         results = []
         seen = set()

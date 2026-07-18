@@ -119,6 +119,30 @@ class PanSouClientTests(unittest.TestCase):
             ["first", "second"],
         )
 
+    def test_missing_merged_by_type_returns_empty_list(self):
+        opener = RecordingOpener(
+            json.dumps(
+                {"code": 0, "message": "success", "data": {"results": [], "total": 0}}
+            ).encode("utf-8")
+        )
+        client = PanSouClient("http://private-pansou:8888", opener=opener)
+
+        self.assertEqual(client.search("幼女战记2"), [])
+
+    def test_null_quark_list_returns_empty_list(self):
+        opener = RecordingOpener(
+            json.dumps(
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"merged_by_type": {"quark": None}},
+                }
+            ).encode("utf-8")
+        )
+        client = PanSouClient("http://private-pansou:8888", opener=opener)
+
+        self.assertEqual(client.search("example"), [])
+
     def test_repr_and_errors_never_expose_endpoint_or_response(self):
         endpoint = "http://private-pansou:8888"
         client = PanSouClient(endpoint, opener=RecordingOpener(b"not-json"))

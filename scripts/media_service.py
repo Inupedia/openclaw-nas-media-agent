@@ -53,7 +53,7 @@ class MediaService:
                 self._count_rejection(rejected, "missing_share")
                 continue
             try:
-                details = self.qas.get_share(share_url, show_all=True)
+                details = self.qas.get_share_expanded(share_url)
             except ClientError:
                 self._count_rejection(rejected, "expired_or_unavailable")
                 continue
@@ -146,12 +146,13 @@ class MediaService:
             share_url = candidate.get("shareurl") or candidate.get("url")
             if not share_url:
                 continue
-            details = self.qas.get_share(share_url, show_all=True)
+            details = self.qas.get_share_expanded(share_url)
             items = list(details.get("list", []) or [])
             remote_keys = {
                 key
                 for item in items
-                if (
+                if not item.get("dir")
+                and (
                     key := extract_episode_key(
                         str(item.get("file_name", "")),
                         title_key,
@@ -397,10 +398,7 @@ class MediaService:
 
     def preview(self, candidate_id: str) -> dict:
         candidate = self.store.get_candidate(candidate_id)
-        details = self.qas.get_share(
-            candidate["shareurl"],
-            show_all=True,
-        )
+        details = self.qas.get_share_expanded(candidate["shareurl"])
         candidate = dict(candidate)
         candidate["details"] = details
         self.store.update_candidate(candidate_id, candidate)
@@ -423,7 +421,13 @@ class MediaService:
                     or "未命名候选"
                 ),
                 "files": files,
-                "fileCount": len(list(details.get("list", []) or [])),
+                "fileCount": len(
+                    [
+                        item
+                        for item in list(details.get("list", []) or [])
+                        if not item.get("dir")
+                    ]
+                ),
             },
             terminal=False,
             next_action="plan_or_choose",

@@ -41,6 +41,9 @@ class FakeQas:
     def get_share(self, url, show_all=True):
         return self.shares[url]
 
+    def get_share_expanded(self, url, **kwargs):
+        return self.get_share(url, show_all=True)
+
     def add_task(self, task):
         self.added.append(task)
         return {"message": "added"}

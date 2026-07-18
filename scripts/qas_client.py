@@ -2,11 +2,27 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from typing import Callable
 
 
 class ClientError(RuntimeError):
     pass
+
+
+DEFAULT_BFS_MAX_DEPTH = 8
+DEFAULT_BFS_MAX_DIRECTORIES = 64
+DEFAULT_BFS_MAX_FILES = 500
+DEFAULT_BFS_MAX_REQUESTS = 80
+
+
+def share_url_for_directory(share_url: str, pdir_fid: str) -> str:
+    """Build a Quark share deep-link that QAS resolves to pdir_fid."""
+    base = str(share_url or "").split("#", 1)[0].rstrip("/")
+    fid = str(pdir_fid or "").strip()
+    if not base or not fid:
+        return str(share_url or "")
+    return f"{base}#/list/share/{fid}"
 
 
 class QasClient:
@@ -87,16 +103,121 @@ class QasClient:
         )
         return list(data or [])
 
-    def get_share(self, share_url: str, show_all: bool = True) -> dict:
+    def get_share(
+        self,
+        share_url: str,
+        show_all: bool = True,
+        *,
+        stoken: str | None = None,
+        pdir_fid: str | None = None,
+    ) -> dict:
+        request_url = (
+            share_url_for_directory(share_url, pdir_fid)
+            if pdir_fid
+            else str(share_url or "")
+        )
+        body: dict = {"shareurl": request_url}
+        if stoken:
+            body["stoken"] = stoken
         data = self._request(
             "/get_share_detail",
             method="POST",
-            body={"shareurl": share_url},
+            body=body,
         )
         if not show_all and isinstance(data, dict):
             data = dict(data)
             data["list"] = list(data.get("list", []))[:10]
         return data
+
+    def get_share_expanded(
+        self,
+        share_url: str,
+        *,
+        max_depth: int = DEFAULT_BFS_MAX_DEPTH,
+        max_directories: int = DEFAULT_BFS_MAX_DIRECTORIES,
+        max_files: int = DEFAULT_BFS_MAX_FILES,
+        max_requests: int = DEFAULT_BFS_MAX_REQUESTS,
+    ) -> dict:
+        """Load a share and BFS into nested folders until files or caps are hit."""
+        root = self.get_share(share_url, show_all=True)
+        if not isinstance(root, dict):
+            return {"list": []}
+
+        root_items = list(root.get("list") or [])
+        files: list[dict] = []
+        directories: list[dict] = []
+        for item in root_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("dir"):
+                directories.append(item)
+            elif item.get("file_name"):
+                files.append(item)
+
+        # Flat file shares need no traversal.
+        if files and not directories:
+            return root
+
+        stoken = root.get("stoken")
+        visited: set[str] = set()
+        queue: deque[tuple[str, int]] = deque()
+        for item in directories:
+            fid = str(item.get("fid") or "").strip()
+            if fid:
+                queue.append((fid, 1))
+
+        requests_used = 1
+        directories_seen = 0
+        while queue and directories_seen < max_directories and requests_used < max_requests:
+            if len(files) >= max_files:
+                break
+            fid, depth = queue.popleft()
+            if not fid or fid in visited:
+                continue
+            visited.add(fid)
+            directories_seen += 1
+            if depth > max_depth:
+                continue
+            try:
+                page = self.get_share(
+                    share_url,
+                    show_all=True,
+                    stoken=stoken if isinstance(stoken, str) else None,
+                    pdir_fid=fid,
+                )
+            except ClientError:
+                continue
+            requests_used += 1
+            if isinstance(page, dict) and page.get("stoken") and not stoken:
+                stoken = page.get("stoken")
+            for item in list((page or {}).get("list") or []):
+                if not isinstance(item, dict) or not item.get("file_name"):
+                    continue
+                if item.get("dir"):
+                    child_fid = str(item.get("fid") or "").strip()
+                    if (
+                        child_fid
+                        and child_fid not in visited
+                        and depth < max_depth
+                        and directories_seen + len(queue) < max_directories
+                    ):
+                        queue.append((child_fid, depth + 1))
+                else:
+                    files.append(item)
+                    if len(files) >= max_files:
+                        break
+
+        expanded = dict(root)
+        # Prefer discovered files for ranking/specs; keep root dirs for context.
+        expanded["list"] = [*files, *directories] if files else root_items
+        expanded["expanded"] = True
+        expanded["expansion"] = {
+            "requests": requests_used,
+            "directories": directories_seen,
+            "files": len(files),
+            "truncated": bool(queue) or len(files) >= max_files,
+        }
+        return expanded
 
     def add_task(self, task: dict) -> dict:
         return self._request(
