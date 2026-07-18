@@ -41,6 +41,15 @@ class ReadmeContractTests(unittest.TestCase):
         for pattern in forbidden_patterns:
             self.assertIsNone(re.search(pattern, content, re.IGNORECASE))
 
+    def test_repository_declares_mit_license(self):
+        license_path = self.readme_path.parent / "LICENSE"
+        self.assertTrue(license_path.is_file(), "LICENSE must exist")
+        license_text = license_path.read_text(encoding="utf-8")
+        readme_text = self.readme_path.read_text(encoding="utf-8")
+        self.assertIn("MIT License", license_text)
+        self.assertIn("Copyright (c) 2026 Inupedia", license_text)
+        self.assertIn("MIT License", readme_text)
+
 
 if __name__ == "__main__":
     unittest.main()
