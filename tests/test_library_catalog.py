@@ -107,6 +107,65 @@ class LibraryCatalogTests(unittest.TestCase):
         self.assertTrue(result["found"])
         self.assertEqual(result["mediaType"], "anime")
         self.assertEqual(result["resolutions"], ["1080p"])
+        self.assertEqual(result["source"], "filesystem")
+
+    def test_lookup_finds_loose_bilingual_movie_file(self):
+        movie_root = self.base / "Movie"
+        movie_root.mkdir()
+        target = movie_root / "星际穿越 Interstellar (2014).mkv"
+        target.write_bytes(b"abc")
+
+        result = LibraryCatalog({"movie": movie_root}).lookup(
+            "搜索《星际穿越》电影资源",
+            "movie",
+        )
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["title"], "星际穿越 Interstellar")
+        self.assertEqual(result["year"], 2014)
+        self.assertEqual(result["fileCount"], 1)
+        self.assertEqual(result["path"], str(target.resolve()))
+        self.assertEqual(result["source"], "filesystem")
+
+    def test_lookup_falls_back_to_videomgr(self):
+        empty = self.base / "EmptyMovie"
+        empty.mkdir()
+        target = self.base / "Elsewhere" / "星际穿越 Interstellar (2014).mkv"
+        target.parent.mkdir()
+        target.write_bytes(b"abc")
+
+        class FakeVideomgr:
+            def search(self, keyword, *, limit=20):
+                return [
+                    {
+                        "name": "星际穿越",
+                        "year": 2014,
+                        "mediaType": "movie",
+                        "filePaths": [str(target)],
+                    }
+                ]
+
+        result = LibraryCatalog(
+            {"movie": empty},
+            videomgr=FakeVideomgr(),
+        ).lookup("星际穿越", "movie")
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["source"], "videomgr")
+        self.assertEqual(result["title"], "星际穿越")
+        self.assertEqual(result["path"], str(target.resolve()))
+        self.assertEqual(result["fileCount"], 1)
+
+    def test_videomgr_errors_are_swallowed(self):
+        class Boom:
+            def search(self, keyword, *, limit=20):
+                raise RuntimeError("down")
+
+        result = LibraryCatalog(
+            {"anime": self.root},
+            videomgr=Boom(),
+        ).lookup("不存在的片子", "anime")
+        self.assertFalse(result["found"])
 
 
 if __name__ == "__main__":

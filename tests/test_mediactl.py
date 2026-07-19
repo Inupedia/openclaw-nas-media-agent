@@ -65,6 +65,23 @@ class MediaCtlContractTests(unittest.TestCase):
         self.assertEqual(args.media_type, "anime")
         self.assertTrue(args.update)
 
+    def test_parser_supports_plan_download_media_type(self):
+        args = parse_args(
+            [
+                "plan",
+                "download",
+                "cand-1",
+                "--node",
+                "n-1",
+                "--media-type",
+                "anime",
+            ]
+        )
+        self.assertEqual(args.command, "plan")
+        self.assertEqual(args.candidate_id, "cand-1")
+        self.assertEqual(args.nodes, ["n-1"])
+        self.assertEqual(args.media_type, "anime")
+
     def test_parser_supports_drama_media_type(self):
         args = parse_args(["search", "Example Show", "--media-type", "drama"])
 

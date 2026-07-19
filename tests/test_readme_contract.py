@@ -25,6 +25,8 @@ class ReadmeContractTests(unittest.TestCase):
             "QAS_BASE_URL",
             "PANSOU_BASE_URL",
             "ARIA2_RPC_URL",
+            ".env.example",
+            "VIDEOMGR",
             "drama",
             "中英双语",
             "https://github.com/Inupedia/openclaw-nas-media-agent.git",

@@ -1,7 +1,7 @@
 ---
 name: resource-download-agent
 description: Use when 用户要求搜索、查找、预览、推荐或下载电影、电视剧、动画、动漫、综艺、纪录片等影视资源，或要求追更、补集、检查更新、换版本、查看下载状态、暂停、继续、取消、删除、校验、整理、释放空间、压缩或转码。
-metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL","QAS_TOKEN","PANSOU_BASE_URL","ARIA2_RPC_URL","ARIA2_RPC_SECRET","RESOURCE_AGENT_STATE_DB"]},"envVars":[{"name":"QAS_BASE_URL","required":true,"description":"QAS API endpoint"},{"name":"QAS_TOKEN","required":true,"description":"QAS API credential"},{"name":"PANSOU_BASE_URL","required":true,"description":"PanSou API endpoint"},{"name":"PANSOU_MAX_CANDIDATES","required":false,"description":"PanSou unique candidate limit, default 50 and maximum 100"},{"name":"JIAOFU_STORAGE_STATE","required":false,"description":"Playwright storage state JSON for jiaofu.com login; defaults to data/jiaofu_storage_state.json when present"},{"name":"JIAOFU_MAX_CANDIDATES","required":false,"description":"Jiaofu candidate limit, default 20 and maximum 50"},{"name":"ARIA2_RPC_URL","required":true,"description":"aria2 RPC endpoint"},{"name":"ARIA2_RPC_SECRET","required":true,"description":"aria2 RPC credential"},{"name":"RESOURCE_AGENT_STATE_DB","required":true,"description":"Agent state database path"}]}}
+metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL","QAS_TOKEN","PANSOU_BASE_URL","ARIA2_RPC_URL","ARIA2_RPC_SECRET","RESOURCE_AGENT_STATE_DB"]},"envVars":[{"name":"QAS_BASE_URL","required":true,"description":"QAS API endpoint"},{"name":"QAS_TOKEN","required":true,"description":"QAS API credential"},{"name":"PANSOU_BASE_URL","required":true,"description":"PanSou API endpoint"},{"name":"PANSOU_MAX_CANDIDATES","required":false,"description":"PanSou unique candidate limit, default 50 and maximum 100"},{"name":"JIAOFU_STORAGE_STATE","required":false,"description":"Playwright storage state JSON for jiaofu.com login; defaults to data/jiaofu_storage_state.json when present"},{"name":"JIAOFU_MAX_CANDIDATES","required":false,"description":"Jiaofu candidate limit, default 20 and maximum 50"},{"name":"ARIA2_RPC_URL","required":true,"description":"aria2 RPC endpoint"},{"name":"ARIA2_RPC_SECRET","required":true,"description":"aria2 RPC credential"},{"name":"RESOURCE_AGENT_STATE_DB","required":true,"description":"Agent state database path"},{"name":"VIDEOMGR_ENABLED","required":false,"description":"Enable UGREEN Theater local search: auto/1/0"},{"name":"VIDEOMGR_BASE_URL","required":false,"description":"Theater HTTP base, e.g. http://172.17.0.1:9999"},{"name":"VIDEOMGR_SOCK","required":false,"description":"Unix socket path to video_serv when mounted into the container"},{"name":"VIDEOMGR_TOKEN","required":false,"description":"UGOS session token for Theater search; prefer Redis discovery"},{"name":"VIDEOMGR_REDIS_HOST","required":false,"description":"Redis host for UGTOKEN-* discovery"},{"name":"VIDEOMGR_REDIS_PORT","required":false,"description":"Redis port for UGTOKEN-* discovery"},{"name":"VIDEOMGR_PREFER_USER","required":false,"description":"Prefer this UGOS username when selecting UGTOKEN-*"}]}}
 ---
 
 # Resource Download Agent
@@ -12,9 +12,21 @@ metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl
 ```
 
+## 智能体行为（像人一样协作）
+
+你不是静默脚本，而是会观察、推断、确认、汇报的助手。用户只丢一个网盘链接或一句话时，按下面做事，**不要卡住不说话**：
+
+1. **先摸清分享**：对候选调用 `tree`，自己读完整目录树——层级、文件夹命名、季/集、画质、字幕、是否混入广告/花絮/合集。用一两句中文向用户说明「我看到了什么、建议选哪些 nodeId、为什么」，不要套固定文件夹名规则。
+2. **类型拿不准就问**：动画（anime）与电视剧（drama）极易搞错。文件名出现 HiveWeb / Baha / VCB / ANi / 繁日 / 动画 等线索时优先按 **anime**；仅有 `SxxExx` **不能**默认当成真人剧。仍不确定时先问用户：电影 / 剧 / 动画 / 纪录片 / 综艺？再 `plan download ... --media-type ...`。
+3. **最终落库必须咨询**：计划里的 `finalPath` 只是路由建议。执行前明确问用户确认媒体类型与最终目录（如 `/volume2/影视/Anime/...` 还是临时库），用户点头后再 `execute`。
+4. **选片不确定就问**：树很深、命名含糊、多版本并存、或 `stats.truncated` 时，列出选项让用户选，不要 silently 全选或瞎猜。
+5. **执行后要盯进度**：`execute` 之后用 `downloads show TASK_ID` 查看。若 `submitted` 且暂存为空 / `aria2Gids` 空，立刻告诉用户「转存可能没产生下载」并给下一步；不要说「已开始下载」后消失。卡住、失败、无文件时也必须主动汇报。
+6. **整理前再确认一次**：`complete` 只表示 `.incoming` 下完，不在影视中心。`validate` → `organize plan` 后，再次确认目标路径与类型，再 `organize execute --confirmed`。
+
 ## 核心约束
 
 - 对作品或资源的询问，先调用 `search`。程序会先查 NAS 本地，再决定是否搜索远端。
+- 用户直接给出夸克分享链接时：先纳入候选流程（搜索/预览得到 `candidateId`），再 `tree` → 解释树 → 确认类型与落库 → `plan download --node ... [--media-type ...]`。不要跳过确认直接执行。
 - JSON 返回 `terminal: true` 时，立即报告结果并停止所有工具调用。
 - `nextAction: stop_local_exists` 表示 NAS 已有该作品；不要联网、不要继续找远端版本。
 - `nextAction: already_up_to_date` 表示本地没有缺集；不要创建计划。
@@ -49,7 +61,7 @@ NAS 本地结果必须排在远端候选之前。
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl search "作品名" --media-type anime --update
 ```
 
-`--media-type` 只能是 `movie`、`drama`、`tv`、`anime`、`documentary`、`show` 或 `other`。电视剧优先使用 `drama`；`tv` 只为旧任务兼容。不确定类型时省略，不要猜。
+`--media-type` 只能是 `movie`、`drama`、`tv`、`anime`、`documentary`、`show` 或 `other`。电视剧用 `drama`；动画/番剧用 `anime`（不要用 `drama` 顶替）；`tv` 只为旧任务兼容。用户已说明类型时必须带上；不确定时先问用户，不要猜成 drama。
 
 搜索返回 `specificationGroups` 时，必须把所有不同规格列给用户选择。每组至少报告可用的分辨率、HDR/Dolby Vision、视频编码、音频、字幕、总大小、文件数和季集范围。`中英双语`字幕排在同等候选前面并标记优选，但不得自动选择候选、不得只展示评分最高或文件最大的版本。用户必须从已展示的 `candidateId` 中选择；选择仍不明确时继续询问。
 
@@ -71,13 +83,13 @@ NAS 本地结果必须排在远端候选之前。
 
 ## 下载
 
-先拿到完整树并选定节点，再用候选 ID 与所选 `nodeId` 生成计划（`--node` 可重复）：
+先拿到完整树并选定节点，再用候选 ID、所选 `nodeId` 与已确认的媒体类型生成计划（`--node` / `--media-type` 可按需使用）：
 
 ```text
-/root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl plan download CANDIDATE_ID --node NODE_ID [--node NODE_ID ...]
+/root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl plan download CANDIDATE_ID --node NODE_ID [--node NODE_ID ...] [--media-type anime]
 ```
 
-未提供 `--node` 时不得猜测或自动全选。向用户报告计划中的作品、选中文件数、下载区、最终目录、冲突和副作用。只有用户明确要求下载，且计划不要求额外确认时，才可以执行：
+未提供 `--node` 时不得猜测或自动全选。向用户报告计划中的作品、**mediaType**、选中文件数、下载区、**finalPath**、冲突和副作用，并征求确认。只有用户明确要求下载、已确认类型与落库路径、且计划不要求额外确认时，才可以执行：
 
 ```text
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl execute PLAN_ID
@@ -90,6 +102,13 @@ NAS 本地结果必须排在远端候选之前。
 ```
 
 所有内容先下载到 `/volume2/downloads/.incoming/<task-id>`。QAS 和 aria2 不得直接把 `/volume2/影视` 或 `/volume3/临时影视` 作为下载目标。
+
+状态含义（不要对用户误报）：
+
+- `submitted`：已交给 QAS/夸克转存，**不代表** aria2 已开始或文件已落盘。若 `aria2Gids` 为空且暂存目录不存在，应如实说「转存未产生下载」，不要说「下载已开始」。
+- `complete`：aria2 已下完到 `.incoming`，**还不在影视中心**。必须先 `downloads validate`，再经用户确认后 `organize`，文件进入正式库后影视中心才会刮削到。
+- 选多个季文件夹时，程序会拆成多次 deep-link 转存；不要改用手写路径或跳过 `tree --node`。
+- 执行后若长时间无进展：主动 `downloads show`，把状态、暂存文件数、错误信息告诉用户，禁止沉默结束回合。
 
 ## 下载状态与控制
 
@@ -119,7 +138,7 @@ NAS 本地结果必须排在远端候选之前。
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl organize plan TASK_ID
 ```
 
-整理会把校验通过的文件从 `/volume2/downloads` 转移到正式媒体库。它始终需要当前用户单独确认：
+整理会把校验通过的文件从 `/volume2/downloads` 转移到正式媒体库。它始终需要当前用户单独确认（含最终路径是否正确；动画应进 Anime，不要误进 Drama）：
 
 ```text
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl organize execute PLAN_ID --confirmed
@@ -146,5 +165,7 @@ NAS 本地结果必须排在远端候选之前。
 | “整季分享里包含新集，重复下载没关系” | 停止；只允许精确差集 |
 | “固定命令失败，我临时写个脚本” | 停止；只报告错误 |
 | “为了排错，把配置结果打印出来” | 停止；只报告已配置或未配置 |
+| “有 SxxExx 所以一定是电视剧” | 停止；结合动画线索或询问用户后再定 `anime`/`drama` |
+| “执行完就不用说话了” | 停止；必须回报状态或明确下一步 |
 
 最终答复用简洁中文，先给状态和结论，再给下一步。

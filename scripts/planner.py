@@ -27,28 +27,99 @@ def resolve_transfer_shareurl(
     index: dict,
     selected_nodes: list[str],
 ) -> str:
-    """Deep-link into the selected folder so QAS lists files at the right level.
+    """Deep-link into a single selected folder for QAS.
 
-    Quark-auto-save only unwraps a single root folder and does not recurse unless
-    update_subdir is set. Nested season folders therefore need a share URL that
-    already points at the directory containing the selected media.
+    Prefer :func:`build_transfer_jobs` when multiple folders may be selected.
     """
-    target_fids: list[str] = []
+    jobs = build_transfer_jobs(base_shareurl, index, selected_nodes)
+    if len(jobs) == 1:
+        return jobs[0]["shareurl"]
+    return str(base_shareurl or "")
+
+
+def _pattern_for_names(names: list[str]) -> str:
+    return "(?i)^(?:" + "|".join(re.escape(name) for name in names) + ")$"
+
+
+def build_transfer_jobs(
+    base_shareurl: str,
+    index: dict,
+    selected_nodes: list[str],
+) -> list[dict]:
+    """One QAS job per selected directory (or parent of selected files).
+
+    quark-auto-save does not recurse into nested season folders unless the
+    share URL already points at that folder. Selecting two seasons therefore
+    must become two deep-linked jobs, not one root URL with a filename regex.
+    """
+    by_fid: dict[str, list[str]] = {}
     for node_id in selected_nodes:
         entry = index.get(node_id) or {}
-        if entry.get("isDirectory"):
-            fid = str(entry.get("fid") or "").strip()
-            if fid:
-                target_fids.append(fid)
+        names = [str(name) for name in (entry.get("mediaNames") or []) if name]
+        if not names:
             continue
-        parent = index.get(entry.get("parentId") or "") or {}
-        fid = str(parent.get("fid") or entry.get("fid") or "").strip()
-        if fid:
-            target_fids.append(fid)
-    unique = list(dict.fromkeys(target_fids))
-    if len(unique) != 1:
-        return str(base_shareurl or "")
-    return share_url_for_directory(base_shareurl, unique[0])
+        if entry.get("isDirectory"):
+            fid = str(entry.get("fid") or "").strip() or "__root__"
+        else:
+            parent = index.get(entry.get("parentId") or "") or {}
+            fid = (
+                str(parent.get("fid") or "").strip()
+                or str(entry.get("fid") or "").strip()
+                or "__root__"
+            )
+        bucket = by_fid.setdefault(fid, [])
+        for name in names:
+            if name not in bucket:
+                bucket.append(name)
+
+    jobs: list[dict] = []
+    for fid, names in by_fid.items():
+        names = sorted(names, key=str.casefold)
+        shareurl = (
+            str(base_shareurl or "")
+            if fid == "__root__"
+            else share_url_for_directory(base_shareurl, fid)
+        )
+        jobs.append(
+            {
+                "shareurl": shareurl,
+                "pattern": _pattern_for_names(names),
+                "fileNames": names,
+                "fileCount": len(names),
+            }
+        )
+    if jobs:
+        return jobs
+    return [
+        {
+            "shareurl": str(base_shareurl or ""),
+            "pattern": r"(?i)^(?!.*\.(?:zip|rar|7z)$).*$",
+            "fileNames": [],
+            "fileCount": 0,
+        }
+    ]
+
+
+_NO_TRANSFER = re.compile(r"没有新的转存任务|没有新的文件|未匹配到|匹配到\s*0")
+_ARIA2_PUSHED = re.compile(r"Aria2\s*下载|📥\s*Aria2", re.I)
+_TRANSFER_ERROR = re.compile(
+    r"失败|illegal text|登录已过期|参数错误|转存失败",
+    re.I,
+)
+
+
+def assess_qas_run_events(events: list[str]) -> None:
+    """Raise ClientError-compatible PlanningError when QAS transferred nothing."""
+    blob = "\n".join(str(item) for item in events)
+    if _ARIA2_PUSHED.search(blob):
+        return
+    if _TRANSFER_ERROR.search(blob):
+        raise PlanningError("QAS execution failed: transfer error in QAS output")
+    if _NO_TRANSFER.search(blob):
+        raise PlanningError(
+            "QAS transferred nothing: pattern matched no files "
+            "(often caused by selecting multiple season folders without deep-link jobs)"
+        )
 
 
 class DownloadPlanner:
@@ -198,6 +269,7 @@ class DownloadPlanner:
         candidate_id: str,
         *,
         node_ids: list[str] | None = None,
+        preferred_media_type: str | None = None,
     ) -> dict:
         try:
             candidate = self.store.get_candidate(candidate_id)
@@ -244,23 +316,30 @@ class DownloadPlanner:
         }
 
         query = str(candidate.get("query", ""))
-        classification = classify(query, selected_details)
+        preferred = preferred_media_type or candidate.get("mediaType")
+        classification = classify(
+            query,
+            selected_details,
+            preferred_type=str(preferred) if preferred else None,
+        )
         task_id = f"rd-{uuid.uuid4().hex[:12]}"
         paths = build_paths(classification, self.routing, task_id)
-        pattern = "(?i)^(?:" + "|".join(
-            re.escape(name) for name in selected_files
-        ) + ")$"
-
-        warnings = []
-        if classification.confidence < 0.85:
-            warnings.append("classification_low_confidence")
-        if self.path_exists(paths["final_path"]):
-            warnings.append("final_path_exists")
-        transfer_shareurl = resolve_transfer_shareurl(
+        transfer_jobs = build_transfer_jobs(
             str(candidate.get("shareurl") or ""),
             index,
             selected_nodes,
         )
+        primary = transfer_jobs[0]
+        pattern = primary["pattern"]
+        transfer_shareurl = primary["shareurl"]
+
+        warnings = []
+        if classification.confidence < 0.85:
+            warnings.append("classification_low_confidence")
+        if not preferred_media_type and not candidate.get("mediaType"):
+            warnings.append("confirm_media_type")
+        if self.path_exists(paths["final_path"]):
+            warnings.append("final_path_exists")
         task = {
             "taskname": classification.title,
             "shareurl": transfer_shareurl,
@@ -277,6 +356,14 @@ class DownloadPlanner:
                 }
             },
         }
+        transfer_tasks = [
+            {
+                **task,
+                "shareurl": job["shareurl"],
+                "pattern": job["pattern"],
+            }
+            for job in transfer_jobs
+        ]
         incremental = {
             "existingEpisodes": list(candidate.get("existingEpisodes", [])),
             "newEpisodes": list(candidate.get("newEpisodes", [])),
@@ -314,6 +401,7 @@ class DownloadPlanner:
             "finalPath": paths["final_path"],
             "incremental": incremental,
             "task": task,
+            "transferTasks": transfer_tasks,
             "warnings": warnings,
             "requiresConfirmation": bool(warnings),
         }
@@ -329,6 +417,7 @@ class DownloadPlanner:
             "incremental": incremental,
             "warnings": warnings,
             "requiresConfirmation": bool(warnings),
+            "transferJobCount": len(transfer_tasks),
         }
 
     def execute(self, plan_id: str, *, confirmed: bool = False) -> dict:
@@ -366,14 +455,25 @@ class DownloadPlanner:
         try:
             if plan["action"] == "subscribe":
                 self.qas.add_task(plan["task"])
-            result = self.qas.run_task(plan["task"])
+            transfer_tasks = list(plan.get("transferTasks") or [])
+            if not transfer_tasks:
+                transfer_tasks = [plan["task"]]
+            for transfer_task in transfer_tasks:
+                result = self.qas.run_task(transfer_task)
+                events = list(result.get("events") or [])
+                assess_qas_run_events(events)
             task_record["status"] = "submitted"
             self.store.upsert_task(task_record)
             return {
                 "taskId": plan["taskId"],
                 "status": "submitted",
                 "action": plan["action"],
+                "transferJobCount": len(transfer_tasks),
             }
+        except PlanningError:
+            task_record["status"] = "failed"
+            self.store.upsert_task(task_record)
+            raise
         except Exception as error:
             task_record["status"] = "failed"
             self.store.upsert_task(task_record)

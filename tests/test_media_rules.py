@@ -55,6 +55,30 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(result.season, 1)
         self.assertEqual(result.episodes, [12])
 
+    def test_anime_release_group_beats_episode_drama(self):
+        result = classify(
+            "幼女战记",
+            share(
+                "[HiveWeb] Youjo Senki S02E01 1080p WEB-DL HEVC AAC CHS.mkv",
+                "[HiveWeb] Youjo Senki S02E02 1080p WEB-DL HEVC AAC CHS.mkv",
+            ),
+        )
+
+        self.assertEqual(result.media_type, "anime")
+        self.assertIn("anime_release_group", result.reasons)
+        self.assertEqual(result.season, 2)
+        self.assertEqual(result.episodes, [1, 2])
+
+    def test_preferred_media_type_overrides_auto(self):
+        result = classify(
+            "黑镜 第二季",
+            share("Black.Mirror.S02E03.1080p.mkv"),
+            preferred_type="anime",
+        )
+
+        self.assertEqual(result.media_type, "anime")
+        self.assertIn("preferred_media_type", result.reasons)
+
     def test_special_episode_uses_season_zero(self):
         result = classify(
             "某剧 特别篇",

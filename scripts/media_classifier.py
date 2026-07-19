@@ -7,6 +7,40 @@ from media_namer import normalize_title
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")
 ARCHIVE_EXTENSIONS = (".zip", ".rar", ".7z")
 SUBTITLE_EXTENSIONS = (".ass", ".ssa", ".srt", ".vtt")
+MEDIA_TYPES = {
+    "movie",
+    "drama",
+    "tv",
+    "anime",
+    "documentary",
+    "show",
+    "other",
+}
+ANIME_HINTS = (
+    "动画",
+    "動漫",
+    "动漫",
+    "anime",
+    "ova",
+    "oad",
+    "剧场版",
+    "劇場版",
+    "番剧",
+    "tv动画",
+    "tv動畫",
+)
+# Common anime release / platform markers in filenames.
+ANIME_RELEASE = re.compile(
+    r"(?i)(?:"
+    r"\bhiveweb\b|\bbaha\b|\bcr\.web-?dl\b|\bcrunchyroll\b|\bhidive\b|"
+    r"\bvcb-?studio\b|\bnekomoe\b|\bsakurato\b|\blilith-?raws\b|"
+    r"\bsweetsub\b|\bai-?raws\b|\bemotion\b|"
+    r"\[ani\]|\bani\s*-|\byst\b|"
+    r"\bjpsc\b|\bcht?&?jp\b|繁日|简日|日语原声|"
+    r"\bweb-?dl\b.*\b(?:hevc|h\.?265|avc|h\.?264)\b.*\b(?:chs|cht|jpsc)\b"
+    r")"
+)
+PREFERRED_ALIASES = {"tv": "drama"}
 
 
 @dataclass(frozen=True)
@@ -54,7 +88,12 @@ def _episode_markers(text: str) -> tuple[int | None, list[int]]:
     return None, []
 
 
-def classify(query: str, share: dict) -> Classification:
+def classify(
+    query: str,
+    share: dict,
+    *,
+    preferred_type: str | None = None,
+) -> Classification:
     names = [
         str(item.get("file_name", ""))
         for item in _files(share)
@@ -65,13 +104,32 @@ def classify(query: str, share: dict) -> Classification:
     reasons = []
 
     lower = combined.lower()
-    if any(token in lower for token in ("动画", "动漫", "anime", "ova")):
+    preferred = (preferred_type or "").strip().casefold()
+    preferred = PREFERRED_ALIASES.get(preferred, preferred)
+
+    anime_hint = any(token in lower for token in ANIME_HINTS)
+    anime_release = bool(ANIME_RELEASE.search(combined))
+
+    if preferred in MEDIA_TYPES:
+        media_type = preferred
+        reasons.append("preferred_media_type")
+        if preferred == "anime" or anime_hint or anime_release:
+            if "anime_hint" not in reasons and (anime_hint or anime_release):
+                reasons.append(
+                    "anime_release_group" if anime_release else "anime_hint"
+                )
+    elif anime_hint:
         media_type = "anime"
         reasons.append("anime_hint")
+    elif anime_release:
+        media_type = "anime"
+        reasons.append("anime_release_group")
     elif any(token in lower for token in ("纪录片", "documentary")):
         media_type = "documentary"
         reasons.append("documentary_hint")
-    elif any(token in lower for token in ("综艺", "真人秀", "show")):
+    elif any(token in lower for token in ("综艺", "真人秀")) or re.search(
+        r"(?i)\b(?:variety|reality)\s*show\b", lower
+    ):
         media_type = "show"
         reasons.append("show_hint")
     elif episodes:
@@ -103,6 +161,10 @@ def classify(query: str, share: dict) -> Classification:
             reasons.append("ambiguous_collection")
 
     confidence = 0.95 if episodes else 0.9 if media_type == "movie" else 0.88
+    if "preferred_media_type" in reasons:
+        confidence = max(confidence, 0.95)
+    if "anime_release_group" in reasons:
+        confidence = max(confidence, 0.92)
     if "ambiguous_collection" in reasons:
         confidence = 0.5
 

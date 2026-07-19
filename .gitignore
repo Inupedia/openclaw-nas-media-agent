@@ -9,6 +9,7 @@ __pycache__/
 .venv/
 .env
 .env.*
+!.env.example
 **/storageState.json
 **/*storage*.json
 **/jiaofu*secret*

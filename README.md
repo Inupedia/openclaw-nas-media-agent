@@ -19,7 +19,7 @@ https://github.com/Inupedia/openclaw-nas-media-agent
 2. 询问并确认下载暂存目录、正式影视库和临时影视库的真实路径。
 3. 用 git clone 安装到 OpenClaw workspace 的 skills/resource-download-agent。
 4. 给 OpenClaw、QAS 和 aria2 挂载同一个下载目录；aria2 容器内必须能以 /nas/downloads 访问该目录。
-5. 配置 QAS_BASE_URL、QAS_TOKEN、PANSOU_BASE_URL、PANSOU_MAX_CANDIDATES、ARIA2_RPC_URL、ARIA2_RPC_SECRET 和 RESOURCE_AGENT_STATE_DB，但绝对不要在回复、日志或提交中输出真实凭据或真实内网地址。
+5. 复制 `.env.example` 为环境变量配置，填写 QAS_BASE_URL、QAS_TOKEN、PANSOU_BASE_URL、PANSOU_MAX_CANDIDATES、ARIA2_RPC_URL、ARIA2_RPC_SECRET 和 RESOURCE_AGENT_STATE_DB；绿联云可选配置 VIDEOMGR_*。绝对不要在回复、日志或提交中输出真实凭据或真实内网地址。
 6. OpenClaw 的 exec 使用 allowlist，ask 关闭，只允许执行本项目 bin/mediactl 的固定绝对路径；不要开放任意 shell、Python、curl 或 sudo。
 7. /volume2/影视 和 /volume3/临时影视 是永久保护库：不得删除、覆盖、清理或把已有内容移出。我的路径不同时，请修改 routing.json 和保护根目录后再部署。
 8. 先运行完整测试和 mediactl check-ready，再用“只预览、不下载”的搜索做验收。
@@ -145,7 +145,11 @@ QAS 和 aria2 都不得把正式媒体库作为直接下载目标。
 
 ## 环境变量
 
-把这些变量配置在 OpenClaw 容器中。下面只有占位值：
+复制 `.env.example` 为 `.env`（或写入 OpenClaw 容器 `environment`），按本机服务填写。仓库只保留占位值：
+
+```bash
+cp .env.example .env
+```
 
 ```yaml
 environment:
@@ -156,9 +160,16 @@ environment:
   ARIA2_RPC_URL: "http://<aria2-host>:<aria2-port>/jsonrpc"
   ARIA2_RPC_SECRET: "<aria2-rpc-secret>"
   RESOURCE_AGENT_STATE_DB: "/root/.openclaw/workspace/data/resource-download-agent/state.db"
+  # Optional — UGREEN 影视中心本地库（Docker 内需能访问 NAS 上的 API / Redis）
+  # VIDEOMGR_ENABLED: "auto"
+  # VIDEOMGR_BASE_URL: "http://<nas-gateway-host>:9999"
+  # VIDEOMGR_REDIS_HOST: "<nas-redis-host>"
+  # VIDEOMGR_PREFER_USER: "<ugreen-username>"
 ```
 
 不要把 `.env`、Cookie、Token、RPC Secret、Authorization Header 或真实内网地址提交到 Git。
+
+本地库查询顺序：先扫 `routing.json` 下的目录与散落视频文件（支持中英混名），未命中时再尝试影视中心搜索 API（需有效 UGOS 会话）。
 
 ## 绿联云 Docker 挂载示例
 

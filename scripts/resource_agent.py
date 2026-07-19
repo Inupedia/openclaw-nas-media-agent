@@ -118,6 +118,27 @@ class ResourceAgent:
             for item in items
             if item.get("errorMessage")
         ]
+        staging = Path(task["staging_path"])
+        staging_exists = staging.is_dir()
+        staging_files = 0
+        if staging_exists:
+            try:
+                staging_files = sum(1 for _ in staging.rglob("*") if _.is_file())
+            except OSError:
+                staging_files = 0
+        notes = []
+        if (
+            task["status"] == "submitted"
+            and not task["aria2_gids"]
+            and staging_files == 0
+        ):
+            notes.append(
+                "transfer_idle: QAS submitted but no aria2 activity / staging files yet"
+            )
+        if task["status"] == "complete" and staging_files > 0:
+            notes.append(
+                "staging_only: files are in .incoming; run validate + organize before Theater"
+            )
         return {
             "taskId": task["task_id"],
             "title": task["title"],
@@ -130,8 +151,11 @@ class ResourceAgent:
             "progress": progress,
             "etaSeconds": eta,
             "stagingPath": task["staging_path"],
+            "stagingExists": staging_exists,
+            "stagingFileCount": staging_files,
             "finalPath": task["final_path"],
             "errors": errors,
+            "notes": notes,
         }
 
     def downloads_list(self) -> dict:
@@ -320,6 +344,11 @@ def parse_args(argv) -> argparse.Namespace:
         default=[],
         help="tree nodeId selected via mediactl tree (repeatable)",
     )
+    plan_download.add_argument(
+        "--media-type",
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
+        help="override auto classification / final library route",
+    )
     execute = subparsers.add_parser("execute")
     execute.add_argument("plan_id")
     execute.add_argument("--confirmed", action="store_true")
@@ -360,13 +389,15 @@ def emit(result: dict, *, stream=None) -> None:
 
 
 def _default_service_factory(routing, store, qas, pansou, jiaofu=None):
+    from videomgr_client import client_from_env
+
     roots = {
         media_type: Path(route["final_root"])
         for media_type, route in routing.items()
         if isinstance(route, dict) and route.get("final_root")
     }
     return MediaService(
-        LibraryCatalog(roots),
+        LibraryCatalog(roots, videomgr=client_from_env()),
         qas,
         store,
         pansou,
@@ -490,6 +521,7 @@ def main(
                 planner.plan_selected(
                     args.candidate_id,
                     node_ids=list(getattr(args, "nodes", []) or []),
+                    preferred_media_type=getattr(args, "media_type", None),
                 ),
                 next_action="review_plan",
             )

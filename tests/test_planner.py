@@ -50,7 +50,7 @@ class FakeQas:
 
     def run_task(self, task):
         self.ran.append(task)
-        return {"submitted": True}
+        return {"submitted": True, "events": []}
 
 
 class PlannerTests(unittest.TestCase):
@@ -429,6 +429,61 @@ class PlannerTests(unittest.TestCase):
         self.assertIn(r"ep02\.mp4", stored["task"]["pattern"])
         self.assertNotIn(r"ep01\.mp4", stored["task"]["pattern"])
 
+    def test_plan_selected_hiveweb_files_classify_as_anime(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "幼女战记",
+                "shareurl": "https://pan.quark.cn/s/abc123",
+                "candidate": {"taskname": "幼女战记"},
+                "details": {"share": {"title": "幼女战记"}, "list": []},
+                "treeIndex": {
+                    "n-s02": {
+                        "nodeId": "n-s02",
+                        "name": "S02",
+                        "isDirectory": True,
+                        "mediaNames": [
+                            "[HiveWeb] Youjo Senki S02E01.mkv",
+                            "[HiveWeb] Youjo Senki S02E02.mkv",
+                        ],
+                        "fid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    },
+                },
+            }
+        )
+        result = self.make_planner(FakeQas()).plan_selected(
+            candidate_id,
+            node_ids=["n-s02"],
+        )
+        self.assertEqual(result["classification"]["mediaType"], "anime")
+        self.assertIn("Anime", result["finalPath"])
+        self.assertIn("confirm_media_type", result["warnings"])
+
+    def test_plan_selected_media_type_override(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "幼女战记",
+                "shareurl": "https://pan.quark.cn/s/abc123",
+                "candidate": {"taskname": "幼女战记"},
+                "details": {"share": {"title": "幼女战记"}, "list": []},
+                "treeIndex": {
+                    "n-s02": {
+                        "nodeId": "n-s02",
+                        "name": "S02",
+                        "isDirectory": True,
+                        "mediaNames": ["Show.S02E01.mkv"],
+                        "fid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    },
+                },
+            }
+        )
+        result = self.make_planner(FakeQas()).plan_selected(
+            candidate_id,
+            node_ids=["n-s02"],
+            preferred_media_type="anime",
+        )
+        self.assertEqual(result["classification"]["mediaType"], "anime")
+        self.assertNotIn("confirm_media_type", result["warnings"])
+
     def test_selected_plan_execution_returns_no_raw_qas_events(self):
         url = "https://pan.quark.cn/s/movie"
         qas = FakeQas()
@@ -462,6 +517,111 @@ class PlannerTests(unittest.TestCase):
         self.assertNotIn("qas", result)
         self.assertEqual(len(qas.ran), 1)
 
+    def test_plan_selected_splits_multi_season_folders_into_transfer_jobs(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "开玩笑",
+                "shareurl": "https://pan.quark.cn/s/abc123",
+                "candidate": {"taskname": "开玩笑"},
+                "details": {"share": {"title": "开玩笑"}, "list": []},
+                "treeIndex": {
+                    "n-s01": {
+                        "nodeId": "n-s01",
+                        "name": "第一季",
+                        "isDirectory": True,
+                        "mediaNames": ["开玩笑 - S01E01 - 第1集.mkv"],
+                        "fid": "11111111111111111111111111111111",
+                    },
+                    "n-s02": {
+                        "nodeId": "n-s02",
+                        "name": "第二季",
+                        "isDirectory": True,
+                        "mediaNames": ["开玩笑 - S02E01 - 第1集.mkv"],
+                        "fid": "22222222222222222222222222222222",
+                    },
+                },
+            }
+        )
+        result = self.make_planner(FakeQas()).plan_selected(
+            candidate_id,
+            node_ids=["n-s01", "n-s02"],
+        )
+        self.assertEqual(result["transferJobCount"], 2)
+        stored = self.store.read_plan(result["planId"], "download")
+        jobs = stored["transferTasks"]
+        self.assertEqual(len(jobs), 2)
+        urls = {job["shareurl"] for job in jobs}
+        self.assertIn(
+            "https://pan.quark.cn/s/abc123#/list/share/11111111111111111111111111111111",
+            urls,
+        )
+        self.assertIn(
+            "https://pan.quark.cn/s/abc123#/list/share/22222222222222222222222222222222",
+            urls,
+        )
+        # Must NOT fall back to bare root share for either job.
+        self.assertNotIn("https://pan.quark.cn/s/abc123", urls)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_execute_runs_all_transfer_jobs(self):
+        qas = FakeQas()
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "开玩笑",
+                "shareurl": "https://pan.quark.cn/s/abc123",
+                "candidate": {"taskname": "开玩笑"},
+                "details": {"share": {"title": "开玩笑"}, "list": []},
+                "treeIndex": {
+                    "n-s01": {
+                        "nodeId": "n-s01",
+                        "name": "第一季",
+                        "isDirectory": True,
+                        "mediaNames": ["a.mkv"],
+                        "fid": "11111111111111111111111111111111",
+                    },
+                    "n-s02": {
+                        "nodeId": "n-s02",
+                        "name": "第二季",
+                        "isDirectory": True,
+                        "mediaNames": ["b.mkv"],
+                        "fid": "22222222222222222222222222222222",
+                    },
+                },
+            }
+        )
+        planner = self.make_planner(qas)
+        plan = planner.plan_selected(candidate_id, node_ids=["n-s01", "n-s02"])
+        result = planner.execute(plan["planId"], confirmed=True)
+        self.assertEqual(result["transferJobCount"], 2)
+        self.assertEqual(len(qas.ran), 2)
+
+    def test_execute_fails_when_qas_reports_no_transfer(self):
+        class NoTransferQas(FakeQas):
+            def run_task(self, task):
+                self.ran.append(task)
+                return {
+                    "submitted": True,
+                    "events": ["任务结束：没有新的转存任务"],
+                }
+
+        qas = NoTransferQas()
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "开玩笑",
+                "shareurl": "https://pan.quark.cn/s/abc123",
+                "candidate": {"taskname": "开玩笑"},
+                "details": {"share": {"title": "开玩笑"}, "list": []},
+                "treeIndex": {
+                    "n-s01": {
+                        "nodeId": "n-s01",
+                        "name": "第一季",
+                        "isDirectory": True,
+                        "mediaNames": ["a.mkv"],
+                        "fid": "11111111111111111111111111111111",
+                    },
+                },
+            }
+        )
+        planner = self.make_planner(qas)
+        plan = planner.plan_selected(candidate_id, node_ids=["n-s01"])
+        with self.assertRaisesRegex(PlanningError, "transferred nothing"):
+            planner.execute(plan["planId"], confirmed=True)
