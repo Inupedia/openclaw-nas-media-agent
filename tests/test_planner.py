@@ -132,7 +132,7 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(result["selected"]["shareurl"], good_url)
         self.assertGreaterEqual(result["selected"]["score"], 70)
-        self.assertFalse(result["requiresConfirmation"])
+        self.assertTrue(result["requiresConfirmation"])
 
     def test_search_never_selects_archive_only_candidate(self):
         archive_url = "https://pan.quark.cn/s/archive"

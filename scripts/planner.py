@@ -371,7 +371,7 @@ class DownloadPlanner:
             "finalPath": paths["final_path"],
             "task": task,
             "warnings": warnings,
-            "requiresConfirmation": bool(warnings),
+            "requiresConfirmation": True,
         }
         plan_id = self.store.create_plan("download", plan_payload)
         return {"planId": plan_id, **plan_payload}
@@ -637,7 +637,7 @@ class DownloadPlanner:
             "task": task,
             "transferTasks": transfer_tasks,
             "warnings": warnings,
-            "requiresConfirmation": bool(warnings),
+            "requiresConfirmation": True,
         }
         plan_id = self.store.create_plan("download", plan_payload)
         return {
@@ -651,7 +651,7 @@ class DownloadPlanner:
             "incremental": incremental,
             "expectedManifest": expected_manifest,
             "warnings": warnings,
-            "requiresConfirmation": bool(warnings),
+            "requiresConfirmation": True,
             "transferJobCount": len(transfer_tasks),
         }
 
@@ -660,7 +660,7 @@ class DownloadPlanner:
             plan = self.store.read_plan(plan_id, "download")
         except PlanError as error:
             raise PlanningError(str(error)) from None
-        if plan["requiresConfirmation"] and not confirmed:
+        if not confirmed:
             raise PlanningError("download plan requires confirmation")
         try:
             plan = self.store.consume_plan(plan_id, "download")
