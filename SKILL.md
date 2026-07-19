@@ -20,7 +20,7 @@ metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL
 
 1. **先摸清分享**：对候选调用 `tree`，自己读完整目录树——层级、文件夹命名、季/集、画质、字幕、是否混入广告/花絮/合集/小说漫画。用一两句中文向用户说明「我看到了什么、建议选哪些 nodeId、为什么」，不要套固定文件夹名规则。
 2. **类型拿不准就问**：动画（anime）与电视剧（drama）极易搞错。文件名出现 HiveWeb / Baha / VCB / ANi / LoliHouse / 繁日 / 动画 等线索时优先按 **anime**；仅有 `SxxExx` **不能**默认当成真人剧。仍不确定时先问用户：电影 / 剧 / 动画 / 纪录片 / 综艺？再 `plan download ... --media-type ...`。
-3. **最终落库必须咨询**：计划里的 `finalPath` 只是路由建议。执行前明确问用户确认媒体类型与最终目录（如 `/volume2/影视/Anime/...` 还是临时库），用户点头后再 `execute`。
+3. **最终落库必须咨询**：计划里的 `finalPath` 只是路由建议，且必须来自 `plan download` 返回值（Anime → `/volume2/影视/Anime/...`，Drama → routing 中的剧路径，Movie → 临时库 Movie 等）。**禁止臆造** `/volume2/动漫` 等不在 `routing.json` 中的目录。执行前明确问用户确认媒体类型与最终目录，用户点头后再 `execute`。
 4. **选片不确定就问**：树很深、命名含糊、多版本并存、或 `stats.truncated` 时，列出选项让用户选，不要 silently 全选或瞎猜。同一季下若有多个压制组/画质目录，**必须先问用户要哪一版**，不要两个都选。
 5. **执行后要盯进度**：`execute` 之后用 `downloads show TASK_ID` 查看。若 `submitted` 且暂存为空 / `aria2Gids` 空，立刻告诉用户「转存可能没产生下载」并给下一步；不要说「下载已开始」后消失。卡住、失败、无文件时也必须主动汇报。
 6. **整理前再确认一次**：`complete` 只表示 `.incoming` 下完，不在影视中心。`validate` → `organize plan` 后，再次确认目标路径与类型，再 `organize execute --confirmed`。
