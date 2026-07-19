@@ -102,7 +102,9 @@ def organizing_root(routing: dict) -> Path:
     )
     if configured:
         return Path(str(configured))
-    return Path("/volume3/.openclaw-organizing")
+    # On UGREEN this NAS, /volume3/.openclaw-organizing is a different device
+    # from /volume3/临时影视; stage under the already-mounted movie library root.
+    return Path("/volume3/临时影视/.openclaw-organizing")
 
 
 def path_guard_roots(routing: dict) -> tuple[list[Path], list[Path]]:

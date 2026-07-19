@@ -55,7 +55,7 @@
       "/volume2/影视",
       "/volume3/临时影视"
     ],
-    "organizing_root": "/volume3/.openclaw-organizing"
+    "organizing_root": "/volume3/临时影视/.openclaw-organizing"
   }
 }
 

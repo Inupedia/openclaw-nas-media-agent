@@ -183,8 +183,9 @@ services:
       - /volume2/downloads:/volume2/downloads
       - /volume2/影视:/volume2/影视
       - /volume3/临时影视:/volume3/临时影视
-      # Cross-disk movie organize staging; must share the volume3 filesystem
-      - /volume3/.openclaw-organizing:/volume3/.openclaw-organizing
+      # Movie cross-disk staging lives under the already-mounted 临时影视 volume:
+      # /volume3/临时影视/.openclaw-organizing (same filesystem as Movie).
+      # Do not use /volume3/.openclaw-organizing — on this NAS it is a different device.
 ```
 
 aria2 至少需要：
