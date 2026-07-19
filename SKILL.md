@@ -157,6 +157,7 @@ NAS 本地结果必须排在远端候选之前。
 
 - `mediactl` 失败时，只报告 `error.code`、`error.message` 和 `nextAction`。
 - 不要改用其他命令、临时脚本、底层 HTTP 请求或直接调用 QAS/aria2。
+- 不要用 `web_search` / `web_fetch` 代替 `mediactl search` 找影视资源。
 - 不要用宽泛目录列表代替 `library`、`search` 或 `downloads` 命令。
 - 终止结果之后不要调用联网搜索来“补充资源”。
 - 不要输出 Cookie、Token、RPC Secret、Authorization、完整 Header、环境变量或底层原始响应。
