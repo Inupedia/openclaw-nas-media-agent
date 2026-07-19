@@ -665,19 +665,28 @@ class ResourceAgent:
         }
 
     def check_ready(self, staging_roots: list[Path]) -> dict:
-        try:
-            config = self.qas.get_config()
-        except Exception as error:
+        qas_status = {"configured": False}
+        if self.qas is not None:
+            try:
+                config = self.qas.get_config()
+            except Exception as error:
+                return {
+                    "ok": False,
+                    "nextAction": "configure_qas",
+                    "error": str(error),
+                }
+            if not _qas_cookie(config):
+                return {
+                    "ok": False,
+                    "nextAction": "configure_qas_cookie",
+                    "error": "QAS cookie is not configured",
+                }
+            qas_status = {"configured": True}
+        if self.aria is None:
             return {
                 "ok": False,
-                "nextAction": "configure_qas",
-                "error": str(error),
-            }
-        if not _qas_cookie(config):
-            return {
-                "ok": False,
-                "nextAction": "configure_qas_cookie",
-                "error": "QAS cookie is not configured",
+                "nextAction": "configure_aria2",
+                "error": "aria2 client is not configured",
             }
         try:
             aria_version = self.aria.get_version()
@@ -720,6 +729,7 @@ class ResourceAgent:
                 "aria2Version": aria_version.get("version"),
                 "aria2WriteProbe": probe.get("data"),
                 "pathChecks": path_check.get("data"),
+                "qas": qas_status,
             },
         }
 
@@ -898,6 +908,25 @@ def _load_runtime(command: str | None = None, *, contract_key: str | None = None
     needs_aria = "aria2" in services
     # PanSou is optional supplemental discovery; never hard-required.
     needs_pansou = command in {None, "search"}
+    # Soft-load QAS when credentials exist:
+    # - check-ready: surface cookie readiness
+    # - downloads.*: assess recover eligibility without making QAS hard-required
+    soft_qas_commands = {
+        "check-ready",
+        "downloads.list",
+        "downloads.show",
+        "downloads.pause",
+        "downloads.resume",
+        "downloads.cancel",
+        "downloads.validate",
+    }
+    if (
+        (contract_key in soft_qas_commands or command in {"check-ready", "downloads"})
+        and not needs_qas
+        and os.environ.get("QAS_BASE_URL")
+        and os.environ.get("QAS_TOKEN")
+    ):
+        needs_qas = True
 
     required = []
     if needs_qas:
