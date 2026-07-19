@@ -114,6 +114,9 @@ NAS 本地结果必须排在远端候选之前。
 
 - `submitted`：已交给 QAS/夸克转存，**不代表** aria2 已开始或文件已落盘。若 `aria2Gids` 为空且暂存目录不存在，应如实说「转存未产生下载」，不要说「下载已开始」。
 - `complete`：aria2 已下完到 `.incoming`，**还不在影视中心**。必须先 `downloads validate`，再经用户确认后 `organize`，文件进入正式库后影视中心才会刮削到。
+- `error` + `errorCodes` 含 `18`：aria2 `Download aborted`，常见原因是 `.incoming/<task>` 目录未创建或不可写；看 `notes` 里的 `aria2_error_18` / `staging_missing`。
+- `notes` 含 `aria2_mixed`：同一任务既有完成又有失败 GID（重试残留）；以暂存区是否有完整文件为准，不要只看 error。
+- `notes` 含 `transfer_idle`：QAS 说提交了但没有 aria2/文件——常见于正则没匹配到（多季目录未 deep-link）或「没有新的转存任务」。
 - 选多个季文件夹时，程序会拆成多次 deep-link 转存；不要改用手写路径或跳过 `tree --node`。
 - 执行后若长时间无进展：主动 `downloads show`，把状态、暂存文件数、错误信息告诉用户，禁止沉默结束回合。
 

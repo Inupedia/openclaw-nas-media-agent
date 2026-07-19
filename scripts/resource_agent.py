@@ -40,6 +40,15 @@ def _int(value) -> int:
         return 0
 
 
+def _aggregate_aria_status(items: list[dict]) -> str:
+    """Prefer live/complete over error when GIDs are mixed (retries leave error rows)."""
+    statuses = {str(item.get("status", "")) for item in items}
+    for status in ("active", "waiting", "paused", "complete", "error"):
+        if status in statuses:
+            return status
+    return "submitted"
+
+
 def _pansou_limit(value: str | None) -> int:
     try:
         parsed = int(value or "50")
@@ -98,11 +107,7 @@ class ResourceAgent:
             task["aria2_gids"] = [
                 str(item["gid"]) for item in items if item.get("gid")
             ]
-            statuses = {str(item.get("status", "")) for item in items}
-            for status in ("active", "waiting", "paused", "error", "complete"):
-                if status in statuses:
-                    task["status"] = status
-                    break
+            task["status"] = _aggregate_aria_status(items)
             self.store.upsert_task(task)
         return by_dir
 
@@ -118,6 +123,13 @@ class ResourceAgent:
             for item in items
             if item.get("errorMessage")
         ]
+        error_codes = sorted(
+            {
+                str(item.get("errorCode"))
+                for item in items
+                if str(item.get("errorCode") or "") not in {"", "0"}
+            }
+        )
         staging = Path(task["staging_path"])
         staging_exists = staging.is_dir()
         staging_files = 0
@@ -139,6 +151,21 @@ class ResourceAgent:
             notes.append(
                 "staging_only: files are in .incoming; run validate + organize before Theater"
             )
+        if "18" in error_codes:
+            notes.append(
+                "aria2_error_18: Download aborted - often missing/unwritable "
+                "staging dir under /volume2/downloads/.incoming (chmod 777) "
+                "or Quark/QAS failed to push files"
+            )
+        if task["status"] == "error" and staging_files == 0 and not staging_exists:
+            notes.append(
+                "staging_missing: aria2 target dir was never created on disk"
+            )
+        mixed = {str(item.get("status", "")) for item in items}
+        if "complete" in mixed and "error" in mixed:
+            notes.append(
+                "aria2_mixed: some GIDs complete, some error - check staging files"
+            )
         return {
             "taskId": task["task_id"],
             "title": task["title"],
@@ -155,6 +182,7 @@ class ResourceAgent:
             "stagingFileCount": staging_files,
             "finalPath": task["final_path"],
             "errors": errors,
+            "errorCodes": error_codes,
             "notes": notes,
         }
 

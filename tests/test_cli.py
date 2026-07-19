@@ -166,6 +166,64 @@ class ResourceAgentTests(unittest.TestCase):
 
         self.assertEqual(self.aria.calls, [("remove_result", "abc")])
 
+    def test_mixed_complete_and_error_prefers_complete(self):
+        self.aria.stopped = [
+            {
+                "gid": "ok",
+                "status": "complete",
+                "totalLength": "100",
+                "completedLength": "100",
+                "downloadSpeed": "0",
+                "dir": "/nas/临时影视/.incoming/rd-test",
+                "files": [],
+                "errorCode": "0",
+            },
+            {
+                "gid": "bad",
+                "status": "error",
+                "totalLength": "100",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "dir": "/nas/临时影视/.incoming/rd-test",
+                "files": [],
+                "errorCode": "18",
+                "errorMessage": "Download aborted.",
+            },
+        ]
+
+        result = self.agent.downloads_list()["tasks"][0]
+
+        self.assertEqual(result["status"], "complete")
+        self.assertIn("18", result["errorCodes"])
+        self.assertTrue(
+            any("aria2_error_18" in note for note in result["notes"])
+        )
+        self.assertTrue(
+            any("aria2_mixed" in note for note in result["notes"])
+        )
+
+    def test_error_18_notes_when_staging_missing(self):
+        self.aria.stopped = [
+            {
+                "gid": "bad",
+                "status": "error",
+                "totalLength": "100",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "dir": "/nas/临时影视/.incoming/rd-test",
+                "files": [],
+                "errorCode": "18",
+                "errorMessage": "Download aborted.",
+            }
+        ]
+
+        result = self.agent.downloads_list()["tasks"][0]
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(
+            any("staging_missing" in note for note in result["notes"])
+        )
+
     def test_check_ready_reports_ready(self):
         roots = [
             Path(self.temp_dir.name) / "volume2",

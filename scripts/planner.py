@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+from pathlib import Path
 from typing import Callable
 
 from episode_diff import normalize_title_key
@@ -453,6 +454,12 @@ class DownloadPlanner:
         }
         self.store.upsert_task(task_record)
         try:
+            staging = Path(plan["stagingPath"])
+            staging.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(staging, 0o777)
+            except OSError:
+                pass
             if plan["action"] == "subscribe":
                 self.qas.add_task(plan["task"])
             transfer_tasks = list(plan.get("transferTasks") or [])
@@ -469,6 +476,7 @@ class DownloadPlanner:
                 "status": "submitted",
                 "action": plan["action"],
                 "transferJobCount": len(transfer_tasks),
+                "stagingPath": plan["stagingPath"],
             }
         except PlanningError:
             task_record["status"] = "failed"
