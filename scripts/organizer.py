@@ -23,7 +23,44 @@ TEMPORARY_EXTENSIONS = {".aria2", ".part", ".tmp"}
 
 
 class OrganizeError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "ORGANIZE_ERROR",
+        next_action: str = "review_error",
+    ):
+        super().__init__(message)
+        self.code = code
+        self.next_action = next_action
+
+
+def _source_manifest_detail(root: Path, manifest: dict[str, int]) -> dict[str, dict]:
+    detail: dict[str, dict] = {}
+    for relative, expected_size in manifest.items():
+        path = root / relative
+        if not path.is_file():
+            detail[relative] = {
+                "size": int(expected_size),
+                "mtimeNs": None,
+                "missing": True,
+            }
+            continue
+        stat = path.stat()
+        detail[relative] = {
+            "size": int(stat.st_size),
+            "mtimeNs": int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9))),
+            "missing": False,
+        }
+    return detail
+
+
+def _manifest_hash(detail: dict[str, dict]) -> str:
+    import hashlib
+    import json
+
+    payload = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -363,13 +400,17 @@ class Organizer:
             str(self.ready_root / task_id)
         )
         source_path = report.relocated_path or task["staging_path"]
+        source_detail = _source_manifest_detail(Path(source_path), report.manifest)
         payload = {
             "schemaVersion": 1,
             "taskId": task_id,
+            "taskStatus": task["status"],
             "sourcePath": source_path,
             "readyPath": str(ready_path),
             "finalPath": str(final_path),
             "manifest": report.manifest,
+            "sourceManifest": source_detail,
+            "manifestHash": _manifest_hash(source_detail),
             "requiresConfirmation": True,
         }
         plan_id = self.store.create_plan("organize", payload)
@@ -380,6 +421,7 @@ class Organizer:
             "finalPath": str(final_path),
             "fileCount": len(report.manifest),
             "totalBytes": sum(report.manifest.values()),
+            "manifestHash": payload["manifestHash"],
             "requiresConfirmation": True,
         }
 
@@ -387,18 +429,48 @@ class Organizer:
         try:
             plan = self.store.read_plan(plan_id, "organize")
         except PlanError as error:
-            raise OrganizeError(str(error)) from None
+            raise OrganizeError(
+                str(error),
+                code="PLAN_EXPIRED",
+                next_action="regenerate_plan",
+            ) from None
         if not confirmed:
-            raise OrganizeError("organize plan requires confirmation")
+            raise OrganizeError(
+                "organize plan requires confirmation",
+                code="CONFIRMATION_REQUIRED",
+                next_action="confirm_action",
+            )
         try:
             plan = self.store.consume_plan(plan_id, "organize")
         except PlanError as error:
-            raise OrganizeError(str(error)) from None
+            raise OrganizeError(
+                str(error),
+                code="PLAN_EXPIRED",
+                next_action="regenerate_plan",
+            ) from None
 
         task = self.store.get_task(plan["taskId"])
         if task is None:
-            raise OrganizeError("task not found")
+            raise OrganizeError(
+                "task not found",
+                code="TASK_NOT_FOUND",
+                next_action="stop",
+            )
+        if str(task.get("status")) != str(plan.get("taskStatus") or task.get("status")):
+            raise OrganizeError(
+                "organize plan stale: task status changed",
+                code="ORGANIZE_PLAN_STALE",
+                next_action="revalidate_download",
+            )
         source = self.guard.resolve_existing(plan["sourcePath"])
+        current_detail = _source_manifest_detail(source, plan.get("manifest") or {})
+        expected_hash = str(plan.get("manifestHash") or "")
+        if expected_hash and _manifest_hash(current_detail) != expected_hash:
+            raise OrganizeError(
+                "organize plan stale: source files changed",
+                code="ORGANIZE_PLAN_STALE",
+                next_action="revalidate_download",
+            )
         ready = self.guard.resolve_target(plan["readyPath"])
         final_path = self.guard.resolve_target(plan["finalPath"])
         self.guard.assert_mutable(ready)

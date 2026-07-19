@@ -1,7 +1,7 @@
 ---
 name: resource-download-agent
 description: Use when 搜索/预览 NAS 影视动画、追更补集、下载监控暂停、校验整理入库；删除受保护库内容时拒绝。
-version: 0.4.1
+version: 0.4.2
 homepage: https://github.com/Inupedia/openclaw-nas-media-agent
 metadata:
   openclaw:
@@ -86,7 +86,7 @@ metadata:
 命令必须是上述路径开头的**单一** `mediactl ...` 调用。禁止 `chmod`、`ls`、`bash -lc`、管道、`&&` 或其他包装。失败时只报告错误，不得绕过。
 
 详细命令与示例见 `{baseDir}/references/commands.md`、`{baseDir}/references/examples.md`。
-机器可读契约（副作用级别 / 确认 / 运行时依赖）：`{baseDir}/config/commands.yaml`。
+机器可读契约（副作用 / 确认 / 运行时依赖）：`{baseDir}/config/commands.json`。
 
 ## 不变量
 

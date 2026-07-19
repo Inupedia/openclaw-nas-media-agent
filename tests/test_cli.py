@@ -450,6 +450,56 @@ class ResourceAgentTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["nextAction"], "ready")
 
+    def test_check_ready_without_qas_still_works(self):
+        roots = [
+            Path(self.temp_dir.name) / "volume2",
+            Path(self.temp_dir.name) / "volume3",
+        ]
+        for root in roots:
+            root.mkdir()
+        agent = ResourceAgent(
+            store=self.store,
+            qas=None,
+            aria=self.aria,
+            routing=self.agent.routing,
+        )
+        with patch.dict(os.environ, {"ARIA2_PROBE_URL": "skip"}):
+            result = agent.check_ready(roots)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["qas"]["configured"], False)
+
+    def test_recover_plan_stale_when_cloud_manifest_changes(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-stale"
+        staging.mkdir(parents=True)
+        self._error16_task(staging)
+        self.agent.qas = FakeQas(config={"cookie": ["real-cookie-value"]})
+
+        class ChangingQuark:
+            calls = 0
+
+            def __init__(self, cookie):
+                self.cookie = cookie
+
+            def list_files(self, path):
+                ChangingQuark.calls += 1
+                if ChangingQuark.calls == 1:
+                    return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
+                return [
+                    {"fid": "f1", "name": "ep.mkv", "size": 10},
+                    {"fid": "f2", "name": "ep2.mkv", "size": 20},
+                ]
+
+            def download_entries(self, fids):
+                raise AssertionError("must not download on stale plan")
+
+        ChangingQuark.calls = 0
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}):
+            with patch("resource_agent.QuarkClient", ChangingQuark):
+                planned = self.agent.plan_quark_recovery("rd-test")
+                with self.assertRaisesRegex(AgentError, "PLAN_STALE|stale"):
+                    self.agent.execute_quark_recovery(planned["planId"], confirmed=True)
+        self.assertEqual(self.store.get_task("rd-test")["recover_attempts"], 0)
+
     def test_aria2_probe_maps_agent_path_to_nas(self):
         downloads = Path(self.temp_dir.name) / "volume2" / "downloads"
         staging = downloads / ".incoming"

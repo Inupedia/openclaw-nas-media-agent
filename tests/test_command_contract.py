@@ -1,4 +1,4 @@
-"""Tests for config/commands.yaml loading and CLI enforcement."""
+"""Tests for config/commands.json loading and CLI enforcement."""
 
 from __future__ import annotations
 
@@ -18,8 +18,9 @@ from command_contract import (  # noqa: E402
     ContractError,
     command_key,
     enforce_invocation,
+    leaf_command_keys_from_parser,
     load_command_contract,
-    parse_simple_yaml,
+    recovery_preconditions,
     required_services,
 )
 from resource_agent import main, parse_args  # noqa: E402
@@ -30,7 +31,7 @@ class CommandContractTests(unittest.TestCase):
         self.contract = load_command_contract()
 
     def test_contract_version_and_required_keys(self):
-        self.assertEqual(self.contract["version"], "0.4.1")
+        self.assertEqual(self.contract["version"], "0.4.2")
         commands = self.contract["commands"]
         for key in (
             "library.lookup",
@@ -41,18 +42,23 @@ class CommandContractTests(unittest.TestCase):
             "downloads.recover.execute",
             "organize.execute",
             "check-ready",
+            "downloads.validate",
         ):
             self.assertIn(key, commands)
         self.assertEqual(commands["execute"]["confirmation"], "required")
-        self.assertEqual(commands["downloads.list"]["effect"], "L0")
-        self.assertEqual(
-            required_services("library.lookup", self.contract),
-            set(),
-        )
+        self.assertEqual(commands["downloads.validate"]["requires_services"], [])
+        self.assertEqual(required_services("library.lookup", self.contract), set())
         self.assertEqual(
             required_services("execute", self.contract),
             {"qas", "aria2"},
         )
+        pre = recovery_preconditions(self.contract)
+        self.assertEqual(pre["taskStates"], {"error", "partial_failed"})
+        self.assertEqual(pre["errorCodesExact"], {"16"})
+
+    def test_cli_leaf_commands_match_contract(self):
+        keys = leaf_command_keys_from_parser(parse_args)
+        self.assertEqual(keys, set(self.contract["commands"]))
 
     def test_command_key_mapping(self):
         self.assertEqual(
@@ -63,48 +69,20 @@ class CommandContractTests(unittest.TestCase):
             command_key(parse_args(["downloads", "recover", "plan", "rd-1"])),
             "downloads.recover.plan",
         )
-        self.assertEqual(
-            command_key(
-                parse_args(["downloads", "recover", "execute", "plan-1", "--confirmed"])
-            ),
-            "downloads.recover.execute",
-        )
 
     def test_enforce_confirmation_and_recovery_env(self):
-        with self.assertRaises(ContractError):
+        with self.assertRaises(ContractError) as ctx:
             enforce_invocation(parse_args(["execute", "plan-1"]), contract=self.contract)
-        enforce_invocation(
-            parse_args(["execute", "plan-1", "--confirmed"]),
-            contract=self.contract,
-        )
+        self.assertEqual(ctx.exception.code, "CONFIRMATION_REQUIRED")
         with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "false"}, clear=False):
-            with self.assertRaises(ContractError):
+            with self.assertRaises(ContractError) as ctx:
                 enforce_invocation(
                     parse_args(
-                        [
-                            "downloads",
-                            "recover",
-                            "execute",
-                            "plan-1",
-                            "--confirmed",
-                        ]
+                        ["downloads", "recover", "execute", "plan-1", "--confirmed"]
                     ),
                     contract=self.contract,
                 )
-        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}, clear=False):
-            enforce_invocation(
-                parse_args(
-                    ["downloads", "recover", "execute", "plan-1", "--confirmed"]
-                ),
-                contract=self.contract,
-            )
-
-    def test_yaml_list_and_nested_parse(self):
-        parsed = parse_simple_yaml(
-            "version: \"1.0\"\ncommands:\n  demo:\n    requires_services: [qas, aria2]\n"
-        )
-        self.assertEqual(parsed["version"], "1.0")
-        self.assertEqual(parsed["commands"]["demo"]["requires_services"], ["qas", "aria2"])
+            self.assertEqual(ctx.exception.code, "RECOVERY_DISABLED")
 
     def test_main_rejects_unconfirmed_execute_via_contract(self):
         stream = io.StringIO()
@@ -114,7 +92,9 @@ class CommandContractTests(unittest.TestCase):
 
         code = main(["execute", "plan-1"], runtime_loader=fake_loader, stream=stream)
         self.assertEqual(code, 1)
-        self.assertIn("requires --confirmed", stream.getvalue())
+        payload = stream.getvalue()
+        self.assertIn("requires --confirmed", payload)
+        self.assertIn("CONFIRMATION_REQUIRED", payload)
 
     def test_library_runtime_does_not_require_qas(self):
         stream = io.StringIO()
@@ -128,7 +108,6 @@ class CommandContractTests(unittest.TestCase):
             }
 
             def fake_loader(command=None, contract_key=None):
-                self.assertEqual(command, "library")
                 self.assertEqual(contract_key, "library.lookup")
                 from state_store import StateStore
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2
+
+### Contract / runtime
+
+- Replaced `commands.yaml` + custom parser with `config/commands.json` (stdlib JSON + schema validation).
+- Multi-dimensional effect fields: `reads` / `writes` / `external_mutation` / `media_mutation`.
+- Recovery `preconditions` and retry policy are enforced from the contract (no hard-coded allowed states).
+- Stable error codes: `CONFIRMATION_REQUIRED`, `RECOVERY_DISABLED`, `PLAN_STALE`, `ORGANIZE_PLAN_STALE`, etc.
+- `downloads list` returns `attentionRequired` + top-level `nextAction=review_download_tasks` when needed.
+- `downloads.validate` no longer requires aria2 RPC.
+- Recover execute verifies immutable `manifestHash` (fid/name/size) before attempt++; cloud changes → `PLAN_STALE`.
+- Organize execute re-hashes source files; mismatch → `ORGANIZE_PLAN_STALE` / `revalidate_download`.
+- `.ready` / `.quarantine` use `0750` (not world-writable); only downloads root + `.incoming` stay `0777`.
+- `ensure_aria2_writable(..., downloads_root=)` refuses chmod outside managed downloads root.
+- `check-ready` works with `qas=None` (QAS soft-checked when credentials exist).
+
 ## 0.4.1
 
 ### Behavior / contract

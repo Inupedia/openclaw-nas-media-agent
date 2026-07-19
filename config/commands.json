@@ -1,0 +1,186 @@
+{
+  "version": "0.4.2",
+  "retryPolicy": {
+    "quarkRecovery": {
+      "enabledEnv": "QUARK_RECOVERY_ENABLED",
+      "maxAttemptsEnv": "QUARK_RECOVERY_MAX_ATTEMPTS",
+      "defaultMaxAttempts": 2,
+      "maxAllowedAttempts": 5,
+      "cooldownEnv": "QUARK_RECOVERY_COOLDOWN_SECONDS",
+      "defaultCooldownSeconds": 300
+    }
+  },
+  "commands": {
+    "check-ready": {
+      "confirmation": "none",
+      "requires_services": ["aria2"],
+      "reads": ["routing", "aria2_rpc", "staging_filesystem", "library_roots"],
+      "writes": ["staging_filesystem", "aria2_rpc"],
+      "external_mutation": "probe",
+      "media_mutation": false,
+      "notes": "May chmod managed downloads/.incoming and run a short aria2 write probe; QAS soft-checked when credentials exist"
+    },
+    "library.lookup": {
+      "confirmation": "none",
+      "requires_services": [],
+      "reads": ["library_filesystem", "videomgr_optional"],
+      "writes": [],
+      "external_mutation": false,
+      "media_mutation": false
+    },
+    "search": {
+      "confirmation": "none",
+      "requires_services": ["qas"],
+      "reads": ["qas", "pansou_optional", "jiaofu_optional", "library_filesystem"],
+      "writes": ["state_db"],
+      "external_mutation": "remote_query",
+      "media_mutation": false
+    },
+    "share.open": {
+      "confirmation": "none",
+      "requires_services": ["qas"],
+      "reads": ["qas"],
+      "writes": ["state_db"],
+      "external_mutation": "remote_query",
+      "media_mutation": false
+    },
+    "preview": {
+      "confirmation": "none",
+      "requires_services": ["qas"],
+      "reads": ["qas", "state_db"],
+      "writes": ["state_db"],
+      "external_mutation": "remote_query",
+      "media_mutation": false
+    },
+    "tree": {
+      "confirmation": "none",
+      "requires_services": ["qas"],
+      "reads": ["qas", "state_db"],
+      "writes": ["state_db"],
+      "external_mutation": "remote_query",
+      "media_mutation": false
+    },
+    "import-url": {
+      "confirmation": "none",
+      "requires_services": ["qas"],
+      "reads": ["qas"],
+      "writes": ["state_db"],
+      "external_mutation": "remote_query",
+      "media_mutation": false
+    },
+    "plan.download": {
+      "confirmation": "none",
+      "requires_services": ["qas"],
+      "reads": ["qas", "state_db"],
+      "writes": ["state_db"],
+      "external_mutation": false,
+      "media_mutation": false
+    },
+    "execute": {
+      "confirmation": "required",
+      "requires_services": ["qas", "aria2"],
+      "reads": ["qas", "state_db", "aria2_rpc"],
+      "writes": ["state_db", "aria2_rpc", "incoming_files"],
+      "external_mutation": "download",
+      "media_mutation": false,
+      "credential_access": ["qas_cookie"]
+    },
+    "downloads.list": {
+      "confirmation": "none",
+      "requires_services": ["aria2"],
+      "reads": ["state_db", "aria2_rpc", "staging_filesystem"],
+      "writes": ["state_db"],
+      "external_mutation": false,
+      "media_mutation": false,
+      "notes": "Syncs aria2 status into SQLite only; never re-pushes downloads"
+    },
+    "downloads.show": {
+      "confirmation": "none",
+      "requires_services": ["aria2"],
+      "reads": ["state_db", "aria2_rpc", "staging_filesystem"],
+      "writes": ["state_db"],
+      "external_mutation": false,
+      "media_mutation": false
+    },
+    "downloads.pause": {
+      "confirmation": "none",
+      "requires_services": ["aria2"],
+      "reads": ["state_db", "aria2_rpc"],
+      "writes": ["state_db", "aria2_rpc"],
+      "external_mutation": "download_control",
+      "media_mutation": false
+    },
+    "downloads.resume": {
+      "confirmation": "none",
+      "requires_services": ["aria2"],
+      "reads": ["state_db", "aria2_rpc"],
+      "writes": ["state_db", "aria2_rpc"],
+      "external_mutation": "download_control",
+      "media_mutation": false
+    },
+    "downloads.cancel": {
+      "confirmation": "none",
+      "requires_services": ["aria2"],
+      "reads": ["state_db", "aria2_rpc"],
+      "writes": ["state_db", "aria2_rpc"],
+      "external_mutation": "download_control",
+      "media_mutation": false
+    },
+    "downloads.validate": {
+      "confirmation": "none",
+      "requires_services": [],
+      "reads": ["state_db", "staging_filesystem"],
+      "writes": ["state_db", "staging_filesystem"],
+      "external_mutation": false,
+      "media_mutation": false,
+      "notes": "May relocate .incoming → .ready/.quarantine; does not require aria2 RPC"
+    },
+    "downloads.recover.plan": {
+      "confirmation": "none",
+      "requires_services": ["qas", "aria2"],
+      "requires_env": ["QUARK_RECOVERY_ENABLED"],
+      "reads": ["state_db", "qas_cookie", "quark_api", "aria2_rpc", "staging_filesystem"],
+      "writes": ["state_db"],
+      "external_mutation": "remote_query",
+      "media_mutation": false,
+      "credential_access": ["qas_cookie"],
+      "preconditions": {
+        "taskStates": ["error", "partial_failed"],
+        "errorCodesExact": ["16"],
+        "stagingPayload": false
+      }
+    },
+    "downloads.recover.execute": {
+      "confirmation": "required",
+      "requires_services": ["qas", "aria2"],
+      "requires_env": ["QUARK_RECOVERY_ENABLED"],
+      "reads": ["state_db", "qas_cookie", "quark_api", "aria2_rpc"],
+      "writes": ["state_db", "aria2_rpc", "incoming_files"],
+      "external_mutation": "download",
+      "media_mutation": false,
+      "credential_access": ["qas_cookie"],
+      "preconditions": {
+        "taskStates": ["error", "partial_failed"],
+        "errorCodesExact": ["16"],
+        "stagingPayload": false
+      }
+    },
+    "organize.plan": {
+      "confirmation": "none",
+      "requires_services": [],
+      "reads": ["state_db", "staging_filesystem", "library_roots"],
+      "writes": ["state_db", "staging_filesystem"],
+      "external_mutation": false,
+      "media_mutation": false,
+      "notes": "Calls validate which may move staging into .ready/.quarantine"
+    },
+    "organize.execute": {
+      "confirmation": "required",
+      "requires_services": [],
+      "reads": ["state_db", "staging_filesystem", "library_roots"],
+      "writes": ["state_db", "staging_filesystem", "library_filesystem"],
+      "external_mutation": false,
+      "media_mutation": true
+    }
+  }
+}
