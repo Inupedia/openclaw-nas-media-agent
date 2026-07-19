@@ -2,6 +2,7 @@ from episode_diff import (
     EpisodeKey,
     compute_missing,
     extract_episode_key,
+    looks_like_absolute_episode_scheme,
     normalize_title_key,
     select_incremental_files,
 )
@@ -276,6 +277,18 @@ class MediaService:
         }
         seasons = {item.season for item in local_keys}
         default_season = next(iter(seasons)) if len(seasons) == 1 else 1
+        file_count = int(local.get("fileCount") or 0)
+        if file_count > 0 and not local_keys:
+            return success(
+                {
+                    "local": local,
+                    "missing": [],
+                    "remoteCandidates": [],
+                    "warnings": ["local_episodes_unparsed"],
+                },
+                terminal=True,
+                next_action="review_local_naming",
+            )
 
         projected = []
         all_missing: set[EpisodeKey] = set()
@@ -377,10 +390,19 @@ class MediaService:
                 ),
             )
         projected.sort(key=self._candidate_sort_key)
+        missing_for_user = all_missing
+        if looks_like_absolute_episode_scheme(all_missing) or (
+            len({item.episode for item in all_missing}) < len(all_missing)
+        ):
+            # Deduplicate cross-candidate season-label variants of the same abs ep.
+            by_ep: dict[int, EpisodeKey] = {}
+            for item in sorted(all_missing):
+                by_ep.setdefault(item.episode, item)
+            missing_for_user = set(by_ep.values())
         return success(
             {
                 "local": local,
-                "missing": self._serialize_episodes(all_missing),
+                "missing": self._serialize_episodes(missing_for_user),
                 "remoteCandidates": projected,
                 "specificationGroups": self._group_candidates(projected),
                 "candidateCount": len(projected),

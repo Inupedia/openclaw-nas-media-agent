@@ -367,6 +367,24 @@ class DownloadPlanner:
 
         selected_files: list[str] = []
         seen: set[str] = set()
+        new_episodes = list(candidate.get("newEpisodes") or [])
+        update_mode = bool(candidate.get("updateMode") or new_episodes)
+        title_key = str(
+            candidate.get("titleKey")
+            or normalize_title_key(str(candidate.get("query") or ""))
+        )
+        allowed_abs = {
+            int(item["episode"]) for item in new_episodes
+        } if update_mode else set()
+        allowed = {
+            _episode_tuple(item) for item in new_episodes
+        } if update_mode else set()
+        default_season = None
+        if update_mode and new_episodes:
+            seasons = {int(item["season"]) for item in new_episodes}
+            if len(seasons) == 1:
+                default_season = next(iter(seasons))
+
         for node_id in selected_nodes:
             entry = index.get(node_id)
             if not entry:
@@ -377,31 +395,40 @@ class DownloadPlanner:
                     "treeStats.truncated=true; select concrete file nodes or re-fetch tree"
                 )
             for name in entry.get("mediaNames") or []:
-                key = str(name)
-                if key and key not in seen:
-                    seen.add(key)
-                    selected_files.append(key)
+                key_name = str(name)
+                if not key_name or key_name in seen:
+                    continue
+                if update_mode:
+                    mapped = extract_episode_key(
+                        key_name,
+                        title_key,
+                        default_season=default_season,
+                    )
+                    if mapped is None:
+                        continue
+                    # Prefer absolute episode match for continuous long-form anime.
+                    if mapped.episode in allowed_abs or (
+                        mapped.season,
+                        mapped.episode,
+                        mapped.special,
+                    ) in allowed:
+                        seen.add(key_name)
+                        selected_files.append(key_name)
+                    continue
+                seen.add(key_name)
+                selected_files.append(key_name)
         selected_files = sorted(selected_files, key=str.casefold)
         if not selected_files:
-            raise PlanningError("selected nodes contain no media files")
+            raise PlanningError(
+                "selected nodes contain no media files"
+                + (" matching newEpisodes" if update_mode else "")
+            )
 
-        new_episodes = list(candidate.get("newEpisodes") or [])
-        update_mode = bool(candidate.get("updateMode") or new_episodes)
-        title_key = str(
-            candidate.get("titleKey")
-            or normalize_title_key(str(candidate.get("query") or ""))
-        )
         if update_mode:
             if not new_episodes:
                 raise PlanningError(
                     "update_selection_required: candidate has updateMode but empty newEpisodes"
                 )
-            allowed = {_episode_tuple(item) for item in new_episodes}
-            default_season = None
-            seasons = {item[0] for item in allowed}
-            if len(seasons) == 1:
-                default_season = next(iter(seasons))
-            selected_keys = []
             for name in selected_files:
                 key = extract_episode_key(
                     name,
@@ -412,12 +439,14 @@ class DownloadPlanner:
                     raise PlanningError(
                         f"update_selection_invalid: cannot map file to episode: {name}"
                     )
-                selected_keys.append(key)
-                if (key.season, key.episode, key.special) not in allowed:
+                if key.episode not in allowed_abs and (
+                    key.season,
+                    key.episode,
+                    key.special,
+                ) not in allowed:
                     raise PlanningError(
                         "update_selection_invalid: selected files must be a subset of newEpisodes"
                     )
-            # Drop any non-video leftovers if somehow present.
             selected_files = [
                 name
                 for name in selected_files
@@ -447,6 +476,35 @@ class DownloadPlanner:
             index,
             selected_nodes,
         )
+        if update_mode:
+            selected_set = set(selected_files)
+            filtered_jobs = []
+            for job in transfer_jobs:
+                names = [
+                    name
+                    for name in (job.get("fileNames") or [])
+                    if name in selected_set
+                ]
+                if not names:
+                    continue
+                filtered_jobs.append(
+                    {
+                        "shareurl": job["shareurl"],
+                        "pattern": _pattern_for_names(names),
+                        "fileNames": names,
+                        "fileCount": len(names),
+                    }
+                )
+            if not filtered_jobs:
+                filtered_jobs = [
+                    {
+                        "shareurl": str(candidate.get("shareurl") or ""),
+                        "pattern": _pattern_for_names(selected_files),
+                        "fileNames": list(selected_files),
+                        "fileCount": len(selected_files),
+                    }
+                ]
+            transfer_jobs = filtered_jobs
         primary = transfer_jobs[0]
         pattern = primary["pattern"]
         transfer_shareurl = primary["shareurl"]

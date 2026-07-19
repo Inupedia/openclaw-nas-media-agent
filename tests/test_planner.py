@@ -637,6 +637,33 @@ class PlannerTests(unittest.TestCase):
                 "candidate": {"taskname": "Show"},
                 "details": {"share": {"title": "Show"}, "list": []},
                 "treeIndex": {
+                    "n-only-extra": {
+                        "nodeId": "n-only-extra",
+                        "name": "Show.S01E01.mkv",
+                        "isDirectory": False,
+                        "mediaNames": ["Show.S01E01.mkv"],
+                    }
+                },
+                "newEpisodes": [{"season": 1, "episode": 2}],
+            }
+        )
+        with self.assertRaisesRegex(PlanningError, "matching newEpisodes|update_selection_invalid"):
+            self.make_planner(FakeQas()).plan_selected(
+                candidate_id,
+                node_ids=["n-only-extra"],
+            )
+
+    def test_update_mode_intersects_directory_to_new_episodes_only(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Show",
+                "mediaType": "tv",
+                "titleKey": "show",
+                "updateMode": True,
+                "shareurl": "https://pan.quark.cn/s/show",
+                "candidate": {"taskname": "Show"},
+                "details": {"share": {"title": "Show"}, "list": []},
+                "treeIndex": {
                     "n-dir": {
                         "nodeId": "n-dir",
                         "name": "Season 1",
@@ -645,16 +672,21 @@ class PlannerTests(unittest.TestCase):
                             "Show.S01E01.mkv",
                             "Show.S01E02.mkv",
                         ],
+                        "fid": "11111111111111111111111111111111",
                     }
                 },
                 "newEpisodes": [{"season": 1, "episode": 2}],
             }
         )
-        with self.assertRaisesRegex(PlanningError, "update_selection_invalid"):
-            self.make_planner(FakeQas()).plan_selected(
-                candidate_id,
-                node_ids=["n-dir"],
-            )
+        result = self.make_planner(FakeQas()).plan_selected(
+            candidate_id,
+            node_ids=["n-dir"],
+        )
+        self.assertEqual(
+            result["incremental"]["selectedFiles"],
+            ["Show.S01E02.mkv"],
+        )
+        self.assertEqual(result["expectedManifest"]["expectedFileCount"], 1)
 
     def test_truncated_tree_rejects_directory_nodes(self):
         candidate_id = self.store.create_candidate(

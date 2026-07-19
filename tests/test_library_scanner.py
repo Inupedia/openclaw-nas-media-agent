@@ -44,6 +44,19 @@ class LibraryScannerTests(unittest.TestCase):
         episode = next(e for e in entries if e.path.name.endswith("E01.mkv"))
         self.assertEqual((episode.season, episode.episode), (1, 1))
 
+    def test_scan_parses_bare_leading_episode_numbers(self):
+        anime = self.root / "Anime" / "牧神记"
+        anime.mkdir(parents=True)
+        (anime / "01 4K.mp4").write_bytes(b"a")
+        (anime / "91 4K.mp4").write_bytes(b"b")
+        entries = {
+            entry.path.name: entry
+            for entry in scan(anime)
+            if entry.kind == "video"
+        }
+        self.assertEqual(entries["01 4K.mp4"].episode, 1)
+        self.assertEqual(entries["91 4K.mp4"].episode, 91)
+
     def test_health_separates_problems(self):
         report = health(scan(self.root), now=time.time())
         self.assertEqual(report["healthyMedia"], 2)

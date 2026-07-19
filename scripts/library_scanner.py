@@ -1,14 +1,14 @@
 import os
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from episode_diff import SXXEXX, extract_episode_key
 
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
 SKIP_DIRECTORIES = {".incoming", "#recycle"}
-EPISODE = re.compile(r"(?i)S(\d{1,2})E(\d{1,3})")
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,28 @@ class MediaEntry:
     modified_at: float
     season: int | None = None
     episode: int | None = None
+
+
+def _season_hint(path: Path, root: Path) -> int | None:
+    for parent in path.parents:
+        if parent == root or parent == path:
+            continue
+        match = SXXEXX.search(parent.name)
+        if match:
+            return int(match.group(1))
+        lowered = parent.name.casefold()
+        if "season" in lowered or parent.name.startswith("第"):
+            digits = "".join(ch for ch in parent.name if ch.isdigit())
+            if digits:
+                try:
+                    value = int(digits)
+                except ValueError:
+                    continue
+                if 1 <= value <= 40:
+                    return value
+        if parent.parent == root:
+            break
+    return None
 
 
 def scan(root: Path) -> list[MediaEntry]:
@@ -48,7 +70,18 @@ def scan(root: Path) -> list[MediaEntry]:
                 kind = "partial"
             else:
                 continue
-            match = EPISODE.search(path.name)
+            season = None
+            episode = None
+            if kind == "video":
+                hint = _season_hint(path, root)
+                key = extract_episode_key(
+                    path.name,
+                    "",
+                    default_season=hint if hint is not None else 1,
+                )
+                if key is not None:
+                    season = key.season
+                    episode = key.episode
             entries.append(
                 MediaEntry(
                     path=path,
@@ -56,8 +89,8 @@ def scan(root: Path) -> list[MediaEntry]:
                     extension=extension,
                     size=stat.st_size,
                     modified_at=stat.st_mtime,
-                    season=int(match.group(1)) if match else None,
-                    episode=int(match.group(2)) if match else None,
+                    season=season,
+                    episode=episode,
                 )
             )
     return entries

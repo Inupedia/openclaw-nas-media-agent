@@ -35,6 +35,29 @@ class EpisodeDifferenceTests(unittest.TestCase):
             extract_episode_key("Show 第18集.mkv", "show", default_season=1),
             EpisodeKey("show", 1, 18),
         )
+        self.assertEqual(
+            extract_episode_key("01 4K.mp4", "show"),
+            EpisodeKey("show", 1, 1),
+        )
+        self.assertEqual(
+            extract_episode_key("91 4K.mp4", "牧神记"),
+            EpisodeKey("牧神记", 1, 91),
+        )
+
+    def test_absolute_episode_scheme_matches_across_season_labels(self):
+        # Remote encodes absolute ep numbers inside multi-season SxxExx.
+        remote = {
+            EpisodeKey("mushen", 1, 90),
+            EpisodeKey("mushen", 4, 91),
+            EpisodeKey("mushen", 4, 92),
+        }
+        local = {
+            EpisodeKey("mushen", 1, ep) for ep in range(1, 92)
+        }
+        self.assertEqual(
+            compute_missing(remote, local, set(), set()),
+            {EpisodeKey("mushen", 4, 92)},
+        )
 
     def test_update_returns_only_new_episode(self):
         remote = keys("凡人修仙传", 1, [118, 119, 120])
