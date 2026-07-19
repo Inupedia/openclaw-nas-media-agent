@@ -389,15 +389,23 @@ Windows 无法创建符号链接时，相关路径逃逸测试会跳过；Linux/
 
 检查 aria2 是否把同一个主机下载目录挂载为 `/nas/downloads`。本项目提交给 aria2 的保存路径以 `/nas/downloads/.incoming/...` 开头。
 
-### aria2 任务立刻 error 18（Download aborted）且 `.incoming` 为空
+### aria2 任务立刻 error 16/18（Download aborted）且 Permission denied
 
-`aria2-pro` 里的 `aria2c` 通常以 `nobody` 运行。若主机上 `/volume2/downloads/.incoming` 是 `770 root:root`，nobody 无法建目录，任务会马上 abort，磁盘上看不到文件。
+`aria2-pro` 里的 `aria2c` 以 **`nobody`** 运行。若任务目录是 `775 root:root`（OpenClaw/Skill 以 root 创建），nobody 无法打开目标文件，日志会出现：
+
+`Failed to open the file ... cause: Permission denied`
+
+同时 aria2-pro 的 `delete-on-error` 清理会刷大量 `rm: can't remove '/downloads/.incoming/rd-...'`。
 
 处理：
 
 ```bash
-chmod 777 /volume2/downloads/.incoming /volume2/downloads/.ready /volume2/downloads/.quarantine
+mkdir -p /volume2/downloads/.incoming /volume2/downloads/.ready /volume2/downloads/.quarantine
+chmod -R 777 /volume2/downloads/.incoming /volume2/downloads/.ready /volume2/downloads/.quarantine
+chmod 777 /volume2/downloads
 ```
+
+本 Skill 在 `execute` / `recover` / `organize` / `check-ready` 时会自动把托管下载目录设为 `0777`。`check-ready` 若发现暂存区对 others 不可写会报 `fix_path_permissions`。
 
 然后重新执行下载（或让 QAS 再推一次）。QAS 日志里若已有 `📥 Aria2下载`，说明转存已成功，问题在本机写权限，不在夸克。
 

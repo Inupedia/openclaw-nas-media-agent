@@ -19,6 +19,11 @@ from planner import DownloadPlanner, PlanningError
 from quark_client import USER_AGENT, QuarkClient
 from qas_client import ClientError, QasClient
 from state_store import PlanError, StateStore
+from download_fs import (
+    ensure_aria2_writable,
+    ensure_managed_download_roots,
+    is_world_writable,
+)
 
 
 MAX_QUARK_RECOVER_ATTEMPTS = 2
@@ -249,9 +254,7 @@ class ResourceAgent:
 
         staging = Path(task["staging_path"])
         try:
-            staging.mkdir(parents=True, exist_ok=True)
-            # aria2c typically runs as nobody; 775 root:root blocks writes.
-            os.chmod(staging, 0o777)
+            ensure_aria2_writable(staging)
         except OSError:
             pass
 
@@ -485,11 +488,24 @@ class ResourceAgent:
                 "error": str(error),
             }
         for root in staging_roots:
+            try:
+                ensure_aria2_writable(root)
+            except OSError:
+                pass
             if not root.is_dir() or not os.access(root, os.W_OK):
                 return {
                     "ok": False,
                     "nextAction": "fix_path_permissions",
                     "error": f"staging path is not writable: {root}",
+                }
+            if os.name == "posix" and not is_world_writable(root):
+                return {
+                    "ok": False,
+                    "nextAction": "fix_path_permissions",
+                    "error": (
+                        f"staging path is not world-writable for aria2 nobody: "
+                        f"{root} (chmod 777 required)"
+                    ),
                 }
         path_check = self._check_library_roots()
         if not path_check.get("ok"):
@@ -581,11 +597,7 @@ class ResourceAgent:
         probe_name = "openclaw-aria2-probe.bin"
         probe_file = probe_dir / probe_name
         try:
-            probe_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                os.chmod(probe_dir, 0o777)
-            except OSError:
-                pass
+            ensure_aria2_writable(probe_dir)
             try:
                 aria2_dir = agent_path_to_aria2(probe_dir, self.routing)
             except Exception as error:
@@ -922,16 +934,11 @@ def _default_organizer_factory(routing, store):
     allowed, protected = path_guard_roots(routing)
     # Only auto-create staging / organizing dirs. Formal libraries and
     # protected roots must already exist as bind mounts (never shadow them).
-    for root in (
-        downloads / ".incoming",
-        downloads / ".ready",
-        downloads / ".quarantine",
-        org_root,
-    ):
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
+    ensure_managed_download_roots(downloads)
+    try:
+        org_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     guard = PathGuard(
         allowed,
         protected_roots=protected,

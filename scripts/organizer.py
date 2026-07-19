@@ -8,6 +8,7 @@ from typing import Callable
 from episode_diff import extract_episode_key, normalize_title_key
 from path_guard import PathGuard, PathGuardError
 from state_store import PlanError, StateStore
+from download_fs import ensure_aria2_writable, ensure_managed_download_roots
 
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts"}
@@ -49,13 +50,14 @@ class DownloadValidator:
         self.downloads_root = Path(downloads_root).resolve(strict=True)
         self.incoming_root = (
             self.downloads_root / ".incoming"
-        ).resolve(strict=True)
+        ).resolve(strict=False)
         self.ready_root = (
             self.downloads_root / ".ready"
-        ).resolve(strict=True)
+        ).resolve(strict=False)
         self.quarantine_root = (
             self.downloads_root / ".quarantine"
-        ).resolve(strict=True)
+        ).resolve(strict=False)
+        ensure_managed_download_roots(self.downloads_root)
         self.ffprobe_runner = ffprobe_runner
         self.relocate = relocate
 
@@ -181,6 +183,7 @@ class DownloadValidator:
                 f"{'ready' if ok else 'quarantine'} target exists"
             )
         target_root.mkdir(parents=True, exist_ok=True)
+        ensure_aria2_writable(target_root)
         os.replace(source, target)
         task["staging_path"] = str(target)
         task["status"] = desired_status

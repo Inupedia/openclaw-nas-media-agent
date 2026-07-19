@@ -11,6 +11,7 @@ from path_guard import PathGuard, PathGuardError
 from qas_client import ClientError, share_url_for_directory
 from routing_paths import staging_root
 from state_store import PlanError, StateStore
+from download_fs import ensure_aria2_writable
 
 
 class PlanningError(RuntimeError):
@@ -707,12 +708,7 @@ class DownloadPlanner:
                         "unsafe staging path: must be under downloads/.incoming/<task-id>"
                     )
                 staging = resolved
-            staging.mkdir(parents=True, exist_ok=True)
-            try:
-                # aria2c usually runs as nobody; keep task dirs world-writable.
-                os.chmod(staging, 0o777)
-            except OSError:
-                pass
+            ensure_aria2_writable(staging)
             if plan["action"] == "subscribe":
                 self.qas.add_task(plan["task"])
             transfer_tasks = list(plan.get("transferTasks") or [])
