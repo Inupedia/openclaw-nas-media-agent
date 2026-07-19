@@ -440,7 +440,8 @@ class StateStore:
             "verified",
             "complete",
             "ready",
-            "quarantined",
+            # quarantined / error / cancelled do NOT reserve episodes —
+            # failed validation must not block a real re-download.
             "organizing",
         }
         for task in self.list_tasks():

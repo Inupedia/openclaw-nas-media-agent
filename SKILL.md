@@ -1,7 +1,7 @@
 ---
 name: resource-download-agent
 description: Use when 搜索/预览 NAS 影视动画、追更补集、下载监控暂停、校验整理入库；删除受保护库内容时拒绝。
-version: 0.4.2
+version: 0.4.3
 homepage: https://github.com/Inupedia/openclaw-nas-media-agent
 metadata:
   openclaw:

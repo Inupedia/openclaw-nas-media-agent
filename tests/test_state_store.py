@@ -177,6 +177,22 @@ class StateStoreTests(unittest.TestCase):
             {(1, 5, None)},
         )
 
+    def test_pending_episode_refs_exclude_quarantined_tasks(self):
+        self.store.upsert_task(
+            {
+                "task_id": "rd-bad",
+                "title": "Show",
+                "title_key": "show",
+                "media_type": "tv",
+                "aria2_gids": ["abc"],
+                "episode_keys": [{"season": 1, "episode": 92}],
+                "staging_path": "/volume2/downloads/.quarantine/rd-bad",
+                "final_path": "/volume2/影视/Anime/Show",
+                "status": "quarantined",
+            }
+        )
+        self.assertEqual(self.store.pending_episode_refs("show"), set())
+
 
 if __name__ == "__main__":
     unittest.main()

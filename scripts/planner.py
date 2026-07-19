@@ -91,7 +91,28 @@ def build_expected_manifest(
 
     episode_keys: list[dict] = []
     if new_episodes:
-        episode_keys = list(new_episodes)
+        allowed_abs = {int(item["episode"]) for item in new_episodes}
+        allowed = {_episode_tuple(item) for item in new_episodes}
+        found: list[dict] = []
+        seen: set[tuple] = set()
+        for item in videos:
+            key = extract_episode_key(
+                item["name"],
+                title_key,
+                default_season=default_season,
+            )
+            if key is None:
+                continue
+            tup = (key.season, key.episode, key.special)
+            if key.episode not in allowed_abs and tup not in allowed:
+                continue
+            if tup in seen:
+                continue
+            seen.add(tup)
+            found.append(_episode_dict(key))
+        # Only reserve episodes actually selected for download — never the
+        # full candidate newEpisodes list (which can be dozens of false tips).
+        episode_keys = found
     else:
         found = []
         for item in videos:

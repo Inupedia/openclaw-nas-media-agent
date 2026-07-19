@@ -341,7 +341,17 @@ class Organizer:
 
     @staticmethod
     def _same_filesystem(source: Path, target: Path) -> bool:
-        return source.stat().st_dev == target.parent.stat().st_dev
+        try:
+            return source.stat().st_dev == target.parent.stat().st_dev
+        except OSError:
+            return False
+
+    @staticmethod
+    def _is_exdev(error: OSError) -> bool:
+        # errno 18 == EXDEV on Linux; also accept Windows winerror 17.
+        return int(getattr(error, "errno", 0) or 0) == 18 or int(
+            getattr(error, "winerror", 0) or 0
+        ) == 17
 
     @staticmethod
     def _verify_manifest(
@@ -388,8 +398,12 @@ class Organizer:
             raise OrganizeError("task is not complete")
         final_path = self.guard.resolve_target(task["final_path"])
         self.guard.assert_mutable(final_path)
+        merge_into_existing = False
         if final_path.exists():
-            raise OrganizeError("target exists")
+            if not final_path.is_dir():
+                raise OrganizeError("target exists")
+            # Incremental updates land into an existing title folder.
+            merge_into_existing = True
         report = self.validator.validate(task_id)
         if not report.ok:
             raise OrganizeError(
@@ -408,6 +422,7 @@ class Organizer:
             "sourcePath": source_path,
             "readyPath": str(ready_path),
             "finalPath": str(final_path),
+            "mergeIntoExisting": merge_into_existing,
             "manifest": report.manifest,
             "sourceManifest": source_detail,
             "manifestHash": _manifest_hash(source_detail),
@@ -419,6 +434,7 @@ class Organizer:
             "taskId": task_id,
             "sourcePath": source_path,
             "finalPath": str(final_path),
+            "mergeIntoExisting": merge_into_existing,
             "fileCount": len(report.manifest),
             "totalBytes": sum(report.manifest.values()),
             "manifestHash": payload["manifestHash"],
@@ -473,55 +489,35 @@ class Organizer:
             )
         ready = self.guard.resolve_target(plan["readyPath"])
         final_path = self.guard.resolve_target(plan["finalPath"])
+        merge_into_existing = bool(plan.get("mergeIntoExisting"))
         self.guard.assert_mutable(ready)
         self.guard.assert_mutable(final_path)
         if final_path.exists():
-            raise OrganizeError("target exists")
-        if not final_path.parent.is_dir():
+            if not (merge_into_existing and final_path.is_dir()):
+                raise OrganizeError("target exists")
+        elif not final_path.parent.is_dir():
             raise OrganizeError("final parent is not available")
 
         if source.is_relative_to(self.incoming_root):
             if ready.exists():
                 raise OrganizeError("ready target exists")
-            os.replace(source, ready)
+            try:
+                os.replace(source, ready)
+            except OSError as error:
+                if not self._is_exdev(error):
+                    raise
+                shutil.copytree(source, ready, copy_function=shutil.copy2)
+                self.guard.assert_deletable(source)
+                shutil.rmtree(source)
             source = ready
             task["staging_path"] = str(ready)
             task["status"] = "ready"
             self.store.upsert_task(task)
 
-        if self.same_filesystem(source, final_path):
-            self.guard.assert_deletable(source)
-            os.replace(source, final_path)
+        if merge_into_existing:
+            self._merge_into_existing(source, final_path, plan.get("manifest") or {})
         else:
-            self.organizing_root.mkdir(parents=True, exist_ok=True)
-            hidden_target = self.guard.resolve_target(
-                str(self.organizing_root / f".organizing-{plan['taskId']}")
-            )
-            self.guard.assert_mutable(hidden_target)
-            if hidden_target.exists():
-                raise OrganizeError("temporary target exists")
-            try:
-                shutil.copytree(source, hidden_target, copy_function=shutil.copy2)
-                self.fsync_tree(hidden_target)
-                if not self.copy_verifier(
-                    source,
-                    hidden_target,
-                    plan["manifest"],
-                ):
-                    raise OrganizeError("copy verification failed")
-                os.replace(hidden_target, final_path)
-                self.guard.assert_deletable(source)
-                shutil.rmtree(source)
-            except Exception:
-                if hidden_target.exists():
-                    try:
-                        self.guard.assert_deletable(hidden_target)
-                        shutil.rmtree(hidden_target)
-                    except PathGuardError:
-                        pass
-                    except OSError:
-                        pass
-                raise
+            self._promote_directory(source, final_path, plan)
 
         task["staging_path"] = str(source)
         task["final_path"] = str(final_path)
@@ -532,4 +528,112 @@ class Organizer:
             "taskId": task["task_id"],
             "status": "organized",
             "finalPath": str(final_path),
+            "mergeIntoExisting": merge_into_existing,
         }
+
+    def _merge_into_existing(
+        self,
+        source: Path,
+        final_path: Path,
+        manifest: dict,
+    ) -> None:
+        """Copy/move individual files into an existing title directory."""
+        conflicts = []
+        planned: list[tuple[Path, Path]] = []
+        for relative in manifest:
+            src = source / relative
+            dest = final_path / relative
+            if not src.is_file():
+                raise OrganizeError(f"merge source missing: {relative}")
+            if dest.exists():
+                conflicts.append(relative)
+            planned.append((src, dest))
+        if conflicts:
+            raise OrganizeError(
+                "merge conflicts: " + ",".join(conflicts[:8])
+            )
+        for src, dest in planned:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            self.guard.assert_mutable(dest)
+            try:
+                os.replace(src, dest)
+            except OSError as error:
+                if not self._is_exdev(error):
+                    raise
+                shutil.copy2(src, dest)
+                self.guard.assert_deletable(src)
+                src.unlink()
+        self.guard.assert_deletable(source)
+        shutil.rmtree(source)
+
+    def _promote_directory(
+        self,
+        source: Path,
+        final_path: Path,
+        plan: dict,
+    ) -> None:
+        """Move a staging directory to a new final title path."""
+        moved = False
+        if self.same_filesystem(source, final_path):
+            self.guard.assert_deletable(source)
+            try:
+                os.replace(source, final_path)
+                moved = True
+            except OSError as error:
+                if not self._is_exdev(error):
+                    raise
+                moved = False
+        if moved:
+            return
+
+        self.organizing_root.mkdir(parents=True, exist_ok=True)
+        hidden_target = self.guard.resolve_target(
+            str(self.organizing_root / f".organizing-{plan['taskId']}")
+        )
+        self.guard.assert_mutable(hidden_target)
+        if hidden_target.exists():
+            raise OrganizeError("temporary target exists")
+        try:
+            shutil.copytree(source, hidden_target, copy_function=shutil.copy2)
+            self.fsync_tree(hidden_target)
+            if not self.copy_verifier(
+                source,
+                hidden_target,
+                plan["manifest"],
+            ):
+                raise OrganizeError("copy verification failed")
+            try:
+                os.replace(hidden_target, final_path)
+            except OSError as error:
+                if not self._is_exdev(error):
+                    raise
+                shutil.copytree(
+                    hidden_target, final_path, copy_function=shutil.copy2
+                )
+                self.fsync_tree(final_path)
+                if not self.copy_verifier(
+                    source,
+                    final_path,
+                    plan["manifest"],
+                ):
+                    raise OrganizeError("copy verification failed")
+                self.guard.assert_deletable(hidden_target)
+                shutil.rmtree(hidden_target)
+            self.guard.assert_deletable(source)
+            shutil.rmtree(source)
+        except Exception:
+            if hidden_target.exists():
+                try:
+                    self.guard.assert_deletable(hidden_target)
+                    shutil.rmtree(hidden_target)
+                except PathGuardError:
+                    pass
+                except OSError:
+                    pass
+            if final_path.exists() and not plan.get("mergeIntoExisting"):
+                try:
+                    self.guard.assert_deletable(final_path)
+                    shutil.rmtree(final_path)
+                except Exception:
+                    pass
+            raise

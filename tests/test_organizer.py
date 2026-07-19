@@ -123,15 +123,42 @@ class OrganizerTests(unittest.TestCase):
         self.assertIn("temporary_files", report.problems)
         self.assertIn("zero_byte_media", report.problems)
 
-    def test_existing_final_target_is_never_overwritten(self):
+    def test_existing_final_target_merges_new_files(self):
         task = self.make_task()
         source = Path(task["staging_path"])
         source.mkdir()
         (source / "episode.mkv").write_bytes(b"video")
-        Path(task["final_path"]).mkdir()
+        final = Path(task["final_path"])
+        final.mkdir()
+        (final / "old.mkv").write_bytes(b"old")
 
-        with self.assertRaisesRegex(OrganizeError, "target exists"):
-            self.make_organizer().plan(task["task_id"])
+        organizer = self.make_organizer(same_filesystem=True)
+        plan = organizer.plan(task["task_id"])
+        self.assertTrue(plan.get("mergeIntoExisting"))
+        result = organizer.execute(plan["planId"], confirmed=True)
+
+        self.assertEqual(result["status"], "organized")
+        self.assertTrue((final / "episode.mkv").is_file())
+        self.assertTrue((final / "old.mkv").is_file())
+        self.assertFalse(source.exists())
+
+    def test_merge_refuses_overwrite_conflicts(self):
+        task = self.make_task()
+        source = Path(task["staging_path"])
+        source.mkdir()
+        (source / "episode.mkv").write_bytes(b"new")
+        final = Path(task["final_path"])
+        final.mkdir()
+        (final / "episode.mkv").write_bytes(b"old")
+
+        organizer = self.make_organizer(same_filesystem=True)
+        plan = organizer.plan(task["task_id"])
+        with self.assertRaisesRegex(OrganizeError, "merge conflicts"):
+            organizer.execute(plan["planId"], confirmed=True)
+        # Staging may have been relocated to .ready during validate/plan.
+        ready = self.downloads / ".ready" / task["task_id"] / "episode.mkv"
+        self.assertTrue(ready.is_file() or (source / "episode.mkv").is_file())
+        self.assertEqual((final / "episode.mkv").read_bytes(), b"old")
 
     def test_cross_volume_failure_keeps_ready_source(self):
         task = self.make_task(media_type="movie")

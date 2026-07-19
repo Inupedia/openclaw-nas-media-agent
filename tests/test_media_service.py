@@ -596,6 +596,162 @@ class MediaServiceTests(unittest.TestCase):
         self.assertEqual(result["data"]["remoteCandidates"], [])
         self.assertEqual(qas.writes, [])
 
+    def test_update_skips_expired_shares_and_keeps_valid(self):
+        from qas_client import ClientError
+
+        bad = "https://pan.quark.cn/s/dead"
+        good = "https://pan.quark.cn/s/alive"
+
+        class MixedQas(RecordingQas):
+            def get_share_preview(self, share_url):
+                if share_url == bad:
+                    raise ClientError("分享不存在")
+                return super().get_share_preview(share_url)
+
+        qas = MixedQas(
+            candidates=[
+                {"taskname": "Show dead", "shareurl": bad},
+                {"taskname": "Show alive E02", "shareurl": good},
+            ],
+            shares={
+                good: {
+                    "share": {"title": "Show"},
+                    "list": [
+                        {"file_name": "Show.S01E001.mkv", "dir": False, "size": 10},
+                        {"file_name": "Show.S01E002.mkv", "dir": False, "size": 10},
+                    ],
+                }
+            },
+        )
+        local = {
+            "found": True,
+            "title": "Show",
+            "mediaType": "tv",
+            "episodes": [{"season": 1, "episode": 1}],
+            "fileCount": 1,
+        }
+        result = MediaService(FakeCatalog(local), qas, self.store).search(
+            "Show", "tv", update=True
+        )
+        self.assertEqual(result["nextAction"], "choose_candidate")
+        self.assertEqual(result["data"]["candidateCount"], 1)
+        self.assertEqual(
+            result["data"]["rejectedCandidateCounts"].get("expired_or_unavailable"),
+            1,
+        )
+
+    def test_update_expands_nested_dirs_to_find_missing_episode(self):
+        url = "https://pan.quark.cn/s/nested"
+
+        class NestedQas(RecordingQas):
+            def get_share_preview(self, share_url, **kwargs):
+                self.reads.append(("share_preview", share_url))
+                return {
+                    "share": {"title": "牧神记 更新至92集"},
+                    "list": [
+                        {"file_name": "往期集数", "dir": True, "fid": "d1"},
+                        {"file_name": "MSJ 4K EP91.mp4", "dir": False, "size": 10},
+                    ],
+                }
+
+            def get_share_tree(self, share_url, **kwargs):
+                self.reads.append(("share_tree", share_url))
+                return {
+                    "share": {"title": "牧神记 更新至92集"},
+                    "tree": [
+                        {
+                            "name": "往期集数",
+                            "isDirectory": True,
+                            "fid": "d1",
+                            "children": [
+                                {
+                                    "name": "MSJ 4K EP91.mp4",
+                                    "isDirectory": False,
+                                    "size": 10,
+                                    "fid": "f91",
+                                },
+                            ],
+                        },
+                        {
+                            "name": "MSJ 4K EP92.mp4",
+                            "isDirectory": False,
+                            "size": 20,
+                            "fid": "f92",
+                        },
+                    ],
+                    "stats": {"directories": 1, "files": 2, "videos": 2},
+                }
+
+        qas = NestedQas(candidates=[{"taskname": "牧神记 更新至92集", "shareurl": url}])
+        local = {
+            "found": True,
+            "title": "牧神记",
+            "mediaType": "anime",
+            "episodes": [{"season": 1, "episode": e} for e in range(1, 92)],
+            "fileCount": 91,
+        }
+        result = MediaService(FakeCatalog(local), qas, self.store).search(
+            "牧神记", "anime", update=True
+        )
+        self.assertEqual(result["nextAction"], "choose_candidate")
+        missing = {
+            int(item["episode"]) for item in result["data"]["missing"]
+        }
+        self.assertIn(92, missing)
+        self.assertTrue(
+            any(("share_tree", url) == call for call in qas.reads),
+            qas.reads,
+        )
+        news = result["data"]["remoteCandidates"][0]["newEpisodes"]
+        self.assertEqual({int(item["episode"]) for item in news}, {92})
+
+    def test_update_skips_shares_that_jump_over_next_episode(self):
+        """Short-drama packs with 93+ must not win when local tip is 91."""
+        drama = "https://pan.quark.cn/s/drama"
+        anime = "https://pan.quark.cn/s/anime"
+        qas = RecordingQas(
+            candidates=[
+                {"taskname": "牧神记（106集）短剧", "shareurl": drama},
+                {"taskname": "牧神记 更新至92集", "shareurl": anime},
+            ],
+            shares={
+                drama: {
+                    "share": {"title": "短剧"},
+                    "list": [
+                        {"file_name": f"{n}.mp4", "dir": False, "size": 5_000_000}
+                        for n in range(93, 107)
+                    ],
+                },
+                anime: {
+                    "share": {"title": "动漫"},
+                    "list": [
+                        {"file_name": "MSJ 4K EP91.mp4", "dir": False, "size": 10},
+                        {"file_name": "MSJ 4K EP92.mp4", "dir": False, "size": 20},
+                    ],
+                },
+            },
+        )
+        local = {
+            "found": True,
+            "title": "牧神记",
+            "mediaType": "anime",
+            "episodes": [{"season": 1, "episode": e} for e in range(1, 92)],
+            "fileCount": 91,
+        }
+        result = MediaService(FakeCatalog(local), qas, self.store).search(
+            "牧神记", "anime", update=True
+        )
+        self.assertEqual(result["nextAction"], "choose_candidate")
+        self.assertEqual(result["data"]["candidateCount"], 1)
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["title"],
+            "牧神记 更新至92集",
+        )
+        self.assertEqual(
+            {int(e["episode"]) for e in result["data"]["missing"]},
+            {92},
+        )
+
     def test_jiaofu_hits_skip_qas_and_pansou_discovery(self):
         url = "https://pan.quark.cn/s/jiaofu-hit"
         jiaofu = RecordingJiaofu(

@@ -293,44 +293,81 @@ class MediaService:
         projected = []
         all_missing: set[EpisodeKey] = set()
         selection_failed = False
+        rejected = {}
         candidates, warnings = self._discover_candidates(query)
         for candidate in candidates:
             share_url = candidate.get("shareurl") or candidate.get("url")
             if not share_url:
+                self._count_rejection(rejected, "missing_share")
                 continue
-            details = self.qas.get_share_preview(share_url)
-            items = list(details.get("list", []) or [])
-            remote_keys = {
-                key
-                for item in items
-                if not item.get("dir")
-                and (
-                    key := extract_episode_key(
-                        str(item.get("file_name", "")),
-                        title_key,
-                        default_season=default_season,
-                    )
-                )
-                is not None
-            }
+            try:
+                details, items = self._update_share_inventory(share_url)
+            except ClientError:
+                self._count_rejection(rejected, "expired_or_unavailable")
+                continue
+            remote_keys = self._episode_keys_from_items(
+                items, title_key, default_season
+            )
             missing = compute_missing(
                 remote_keys,
                 local_keys,
                 pending_keys,
                 set(),
             )
+            expanded = False
+            if not missing:
+                details2, items2 = self._expand_share_tree_inventory(
+                    share_url, details, items
+                )
+                if items2 is not items:
+                    expanded = True
+                    details, items = details2, items2
+                    remote_keys = self._episode_keys_from_items(
+                        items, title_key, default_season
+                    )
+                    missing = compute_missing(
+                        remote_keys,
+                        local_keys,
+                        pending_keys,
+                        set(),
+                    )
+            missing = self._narrow_update_missing(missing, local_keys)
             if not missing:
                 continue
-            all_missing.update(missing)
             selection = select_incremental_files(
                 items,
                 wanted=missing,
                 title_key=title_key,
                 default_season=default_season,
             )
+            if not selection["selectable"] and not expanded:
+                details, items = self._expand_share_tree_inventory(
+                    share_url, details, items
+                )
+                remote_keys = self._episode_keys_from_items(
+                    items, title_key, default_season
+                )
+                missing = self._narrow_update_missing(
+                    compute_missing(
+                        remote_keys,
+                        local_keys,
+                        pending_keys,
+                        set(),
+                    ),
+                    local_keys,
+                )
+                if not missing:
+                    continue
+                selection = select_incremental_files(
+                    items,
+                    wanted=missing,
+                    title_key=title_key,
+                    default_season=default_season,
+                )
             if not selection["selectable"]:
                 selection_failed = True
                 continue
+            all_missing.update(missing)
             serialized_missing = self._serialize_episodes(missing)
             specification = extract_candidate_spec(details)
             candidate_id = self.store.create_candidate(
@@ -369,6 +406,7 @@ class MediaService:
                     "local": local,
                     "missing": [],
                     "remoteCandidates": [],
+                    "rejectedCandidateCounts": rejected,
                     **({"warnings": warnings} if warnings else {}),
                 },
                 terminal=True,
@@ -380,6 +418,7 @@ class MediaService:
                     "local": local,
                     "missing": self._serialize_episodes(all_missing),
                     "remoteCandidates": [],
+                    "rejectedCandidateCounts": rejected,
                     **({"warnings": warnings} if warnings else {}),
                 },
                 terminal=True,
@@ -406,7 +445,7 @@ class MediaService:
                 "remoteCandidates": projected,
                 "specificationGroups": self._group_candidates(projected),
                 "candidateCount": len(projected),
-                "rejectedCandidateCounts": {},
+                "rejectedCandidateCounts": rejected,
                 **({"warnings": warnings} if warnings else {}),
             },
             terminal=False,
@@ -520,6 +559,116 @@ class MediaService:
             }
             for item in sorted(episodes)
         ]
+
+    def _update_share_inventory(self, share_url: str) -> tuple[dict, list]:
+        """Preview files for update diffs; expand nested dirs when needed.
+
+        Shallow Quark previews often hide newer episodes inside folders
+        (e.g. ``往期集数`` + latest pack). Without a tree walk, update mode
+        falsely reports ``already_up_to_date``. Tree expansion is only used
+        when the preview contains directories and flat files show no missing
+        episodes (or after a failed incremental selection).
+        """
+        details = self.qas.get_share_preview(share_url)
+        items = [
+            item
+            for item in list(details.get("list", []) or [])
+            if isinstance(item, dict)
+        ]
+        return details, items
+
+    def _expand_share_tree_inventory(
+        self,
+        share_url: str,
+        details: dict,
+        items: list,
+    ) -> tuple[dict, list]:
+        has_dir = any(bool(item.get("dir")) for item in items)
+        if not has_dir:
+            return details, items
+        try:
+            raw = self.qas.get_share_tree(share_url)
+        except ClientError:
+            return details, items
+        flat = self._flatten_tree_media_items(raw.get("tree") or [])
+        if not flat:
+            return details, items
+        merged = dict(details)
+        if isinstance(raw.get("share"), dict) and raw["share"]:
+            merged["share"] = raw["share"]
+        merged["list"] = flat
+        if isinstance(raw.get("stats"), dict):
+            merged["treeStats"] = raw["stats"]
+        return merged, flat
+
+    @staticmethod
+    def _flatten_tree_media_items(nodes: list) -> list[dict]:
+        flat: list[dict] = []
+
+        def walk(items: list) -> None:
+            for node in items:
+                if not isinstance(node, dict):
+                    continue
+                if node.get("isDirectory"):
+                    walk(list(node.get("children") or []))
+                    continue
+                name = str(node.get("name") or "").strip()
+                if not name:
+                    continue
+                flat.append(
+                    {
+                        "file_name": name,
+                        "dir": False,
+                        "size": int(node.get("size") or 0),
+                        "fid": node.get("fid"),
+                        "path": node.get("path") or name,
+                    }
+                )
+
+        walk(nodes if isinstance(nodes, list) else [])
+        return flat
+
+    @staticmethod
+    def _episode_keys_from_items(
+        items: list,
+        title_key: str,
+        default_season: int | None,
+    ) -> set[EpisodeKey]:
+        return {
+            key
+            for item in items
+            if not item.get("dir")
+            and (
+                key := extract_episode_key(
+                    str(item.get("file_name", "")),
+                    title_key,
+                    default_season=default_season,
+                )
+            )
+            is not None
+        }
+
+    @staticmethod
+    def _narrow_update_missing(
+        missing: set[EpisodeKey],
+        local_keys: set[EpisodeKey],
+    ) -> set[EpisodeKey]:
+        """Keep gap fills and the contiguous next tip episode only.
+
+        Update shares often contain misparsed high episode numbers (short
+        dramas, random ``NNN.mp4``). Chasing those skips the real next ep.
+        """
+        if not missing or not local_keys:
+            return missing
+        local_eps = {item.episode for item in local_keys}
+        local_max = max(local_eps)
+        next_ep = local_max + 1
+        gap_fills = {item for item in missing if item.episode < next_ep}
+        tip = {item for item in missing if item.episode == next_ep}
+        if tip or gap_fills:
+            return tip | gap_fills
+        # Share jumps over the next episode — not useful for incremental update.
+        return set()
 
     @staticmethod
     def _count_rejection(counts: dict, reason: str) -> None:

@@ -149,7 +149,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("execute PLAN_ID --confirmed", self.content)
 
     def test_skill_recover_requires_confirmation_and_forbids_list_side_effects(self):
-        self.assertIn("version: 0.4.2", self.frontmatter)
+        self.assertIn("version: 0.4.3", self.frontmatter)
         self.assertIn("confirm_recover", self.content)
         self.assertIn("downloads recover plan", self.bundle)
         self.assertIn("downloads recover execute PLAN_ID --confirmed", self.bundle)

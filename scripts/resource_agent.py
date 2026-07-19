@@ -1014,7 +1014,68 @@ class ResourceAgent:
                 pass
 
 
+def hydrate_skill_env_from_openclaw(
+    *,
+    skill_name: str = "resource-download-agent",
+    only_if_missing: bool = True,
+) -> list[str]:
+    """Load skills.entries.<skill>.env from OpenClaw config when unset.
+
+    Credentials live in ``openclaw.json``, but the UGREEN gateway process does
+    not always inject them into tool/exec environments. Without this bootstrap,
+    chat-side ``mediactl search`` sees missing ``QAS_TOKEN`` even though the
+    admin already configured the skill entry.
+    """
+    candidates: list[Path] = []
+    for key in ("OPENCLAW_CONFIG", "OPENCLAW_CONFIG_PATH"):
+        configured = str(os.environ.get(key) or "").strip()
+        if configured:
+            candidates.append(Path(configured))
+    data_dir = str(os.environ.get("OPENCLAW_DATA_DIR") or "").strip()
+    if data_dir:
+        candidates.append(Path(data_dir) / "openclaw.json")
+    candidates.extend(
+        [
+            Path("/root/.openclaw/openclaw.json"),
+            Path("/volume4/docker/openclaw/config/openclaw.json"),
+        ]
+    )
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not path.is_file():
+                continue
+            with path.open(encoding="utf-8") as handle:
+                config = json.load(handle)
+            entries = (config.get("skills") or {}).get("entries") or {}
+            entry = entries.get(skill_name) if isinstance(entries, dict) else None
+            env = entry.get("env") if isinstance(entry, dict) else None
+            if not isinstance(env, dict):
+                continue
+            loaded: list[str] = []
+            for name, value in env.items():
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                text = "" if value is None else str(value)
+                if not text.strip():
+                    continue
+                if only_if_missing and str(os.environ.get(name) or "").strip():
+                    continue
+                os.environ[name] = text
+                loaded.append(name)
+            return loaded
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return []
+
+
 def _load_runtime(command: str | None = None, *, contract_key: str | None = None):
+    hydrate_skill_env_from_openclaw()
     base_dir = Path(__file__).resolve().parents[1]
     with open(
         base_dir / "config" / "routing.json",

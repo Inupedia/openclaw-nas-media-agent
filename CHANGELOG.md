@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.3
+
+### Behavior / reliability
+
+- `search --update` expands nested Quark share trees when shallow preview hides newer episodes.
+- Update mode only chases gap fills and the contiguous next episode (`local_max+1`), skipping short-drama jump packs.
+- Quarantined tasks no longer reserve episode slots in `pending_episode_refs`.
+- Download manifests reserve only episodes present in selected files (not the full candidate `newEpisodes` list).
+- Organize supports merge-into-existing title folders and EXDEV (cross-device) copy fallback.
+- `mediactl` hydrates missing skill env from OpenClaw `openclaw.json` so chat/tool exec sees `QAS_*` / `ARIA2_*` without manual injection.
+
+### Tests
+
+- Nested update inventory, tip-narrowing, quarantine pending exclusion, organize merge/conflict, env hydrate.
+
 ## 0.4.2
 
 ### Contract / runtime

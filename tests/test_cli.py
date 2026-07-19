@@ -619,6 +619,39 @@ class ResourceAgentTests(unittest.TestCase):
         self.assertNotIn(environment["PANSOU_BASE_URL"], repr(pansou))
         runtime[1].close()
 
+    def test_hydrate_skill_env_from_openclaw_fills_missing(self):
+        from resource_agent import hydrate_skill_env_from_openclaw
+
+        cfg = Path(self.temp_dir.name) / "openclaw.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "skills": {
+                        "entries": {
+                            "resource-download-agent": {
+                                "env": {
+                                    "QAS_TOKEN": "from-config",
+                                    "QAS_BASE_URL": "http://qas.from.config",
+                                    "ARIA2_RPC_URL": "http://aria.from.config",
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"OPENCLAW_CONFIG": str(cfg)}, clear=True):
+            loaded = hydrate_skill_env_from_openclaw()
+            self.assertIn("QAS_TOKEN", loaded)
+            self.assertEqual(os.environ["QAS_TOKEN"], "from-config")
+            self.assertEqual(os.environ["QAS_BASE_URL"], "http://qas.from.config")
+            # Existing values must win over config.
+            os.environ["QAS_TOKEN"] = "already-set"
+            loaded2 = hydrate_skill_env_from_openclaw()
+            self.assertNotIn("QAS_TOKEN", loaded2)
+            self.assertEqual(os.environ["QAS_TOKEN"], "already-set")
+
 
 if __name__ == "__main__":
     unittest.main()
