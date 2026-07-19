@@ -30,9 +30,12 @@ class OrganizerTests(unittest.TestCase):
         ):
             path.mkdir(parents=True)
         self.store = StateStore(self.base / "state.db")
+        self.organizing = self.base / "volume3" / ".openclaw-organizing"
+        self.organizing.mkdir(parents=True, exist_ok=True)
         self.guard = PathGuard(
             [
                 self.downloads,
+                self.organizing,
                 self.base / "volume2" / "影视",
                 self.base / "volume3" / "临时影视",
             ],
@@ -82,6 +85,7 @@ class OrganizerTests(unittest.TestCase):
             self.guard,
             self.downloads,
             validator=validator,
+            organizing_root=self.organizing,
             same_filesystem=lambda source, target: same_filesystem,
             copy_verifier=copy_verifier,
             fsync_tree=fsync_tree,
@@ -92,7 +96,7 @@ class OrganizerTests(unittest.TestCase):
             (ROOT / "config" / "routing.json").read_text(encoding="utf-8")
         )
         for name, route in routing.items():
-            if name == "downloads":
+            if name in {"downloads", "paths"}:
                 continue
             self.assertEqual(
                 route["staging_root"],
@@ -145,7 +149,11 @@ class OrganizerTests(unittest.TestCase):
 
         self.assertTrue((self.downloads / ".ready" / task["task_id"]).exists())
         self.assertFalse(Path(task["final_path"]).exists())
-        self.assertTrue(
+        # Temp copy lives outside protected library and is cleaned on failure.
+        self.assertFalse(
+            (self.organizing / f".organizing-{task['task_id']}").exists()
+        )
+        self.assertFalse(
             (
                 Path(task["final_path"]).parent
                 / f".organizing-{task['task_id']}"
@@ -184,6 +192,54 @@ class OrganizerTests(unittest.TestCase):
         organizer.execute(plan["planId"], confirmed=True)
 
         self.assertEqual(events, ["fsync", "verify"])
+
+    def test_validate_rejects_incomplete_expected_manifest(self):
+        task = self.make_task()
+        task["expected_manifest"] = {
+            "transferJobCount": 2,
+            "expectedFileNames": ["a.mkv", "b.mkv"],
+            "expectedFileCount": 2,
+            "expectedEpisodeKeys": [],
+        }
+        self.store.upsert_task(task)
+        source = Path(task["staging_path"])
+        source.mkdir()
+        (source / "a.mkv").write_bytes(b"video")
+        validator = DownloadValidator(
+            self.store,
+            self.guard,
+            self.downloads,
+            ffprobe_runner=None,
+        )
+
+        report = validator.validate(task["task_id"])
+
+        self.assertFalse(report.ok)
+        self.assertIn("expected_files_missing", report.problems)
+        self.assertTrue(
+            (self.downloads / ".quarantine" / task["task_id"]).exists()
+        )
+
+    def test_validate_moves_complete_download_to_ready(self):
+        task = self.make_task()
+        source = Path(task["staging_path"])
+        source.mkdir()
+        (source / "episode.mkv").write_bytes(b"video")
+        validator = DownloadValidator(
+            self.store,
+            self.guard,
+            self.downloads,
+            ffprobe_runner=None,
+        )
+
+        report = validator.validate(task["task_id"])
+
+        self.assertTrue(report.ok)
+        self.assertEqual(report.next_action, "ready_to_organize")
+        self.assertTrue((self.downloads / ".ready" / task["task_id"]).exists())
+        self.assertFalse(source.exists())
+        refreshed = self.store.get_task(task["task_id"])
+        self.assertEqual(refreshed["status"], "ready")
 
 
 if __name__ == "__main__":

@@ -4,10 +4,12 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from episode_diff import normalize_title_key
+from episode_diff import extract_episode_key, normalize_title_key
 from media_classifier import classify, score_candidate
 from media_namer import build_paths
-from qas_client import share_url_for_directory
+from path_guard import PathGuard, PathGuardError
+from qas_client import ClientError, share_url_for_directory
+from routing_paths import staging_root
 from state_store import PlanError, StateStore
 
 
@@ -17,6 +19,71 @@ class PlanningError(RuntimeError):
 
 QUARK_LINK = re.compile(r"https://pan\.quark\.cn/s/[A-Za-z0-9_-]+")
 INTENT_PREFIX = re.compile(r"^\s*(?:请|帮我|给我)?\s*(?:下载|追更|搜索|查找)\s*")
+VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")
+
+
+def _episode_dict(key) -> dict:
+    payload = {"season": key.season, "episode": key.episode}
+    if key.special:
+        payload["special"] = key.special
+    return payload
+
+
+def _episode_tuple(item: dict) -> tuple[int, int, str | None]:
+    return (
+        int(item["season"]),
+        int(item["episode"]),
+        item.get("special"),
+    )
+
+
+def build_expected_manifest(
+    *,
+    transfer_jobs: list[dict],
+    selected_files: list[str],
+    title_key: str,
+    new_episodes: list[dict] | None = None,
+    default_season: int | None = None,
+) -> dict:
+    expected_names = []
+    seen: set[str] = set()
+    for job in transfer_jobs:
+        for name in job.get("fileNames") or []:
+            key = str(name)
+            if key and key not in seen:
+                seen.add(key)
+                expected_names.append(key)
+    if not expected_names:
+        expected_names = list(selected_files)
+
+    episode_keys: list[dict] = []
+    if new_episodes:
+        episode_keys = list(new_episodes)
+    else:
+        found = []
+        for name in expected_names:
+            key = extract_episode_key(
+                name,
+                title_key,
+                default_season=default_season,
+            )
+            if key is not None:
+                found.append(_episode_dict(key))
+        episode_keys = found
+
+    return {
+        "transferJobCount": len(transfer_jobs),
+        "transferJobs": [
+            {
+                "fileNames": list(job.get("fileNames") or []),
+                "fileCount": int(job.get("fileCount") or 0),
+            }
+            for job in transfer_jobs
+        ],
+        "expectedFileNames": expected_names,
+        "expectedFileCount": len(expected_names),
+        "expectedEpisodeKeys": episode_keys,
+    }
 
 
 def _clean_hint(value: str) -> str:
@@ -131,11 +198,14 @@ class DownloadPlanner:
         store: StateStore,
         routing: dict,
         path_exists: Callable[[str], bool] = os.path.exists,
+        path_guard: PathGuard | None = None,
     ):
         self.qas = qas
         self.store = store
         self.routing = routing
         self.path_exists = path_exists
+        self.path_guard = path_guard
+        self.incoming_root = staging_root(routing)
 
     def _candidate_details(self, query: str) -> list[dict]:
         candidates = self.qas.search(query, deep=True)
@@ -289,12 +359,23 @@ class DownloadPlanner:
                 "selection_required: run mediactl tree before planning"
             )
 
+        details = candidate.get("details")
+        if not isinstance(details, dict):
+            details = {"share": {}, "list": []}
+        tree_stats = details.get("treeStats") if isinstance(details.get("treeStats"), dict) else {}
+        truncated = bool(tree_stats.get("truncated"))
+
         selected_files: list[str] = []
         seen: set[str] = set()
         for node_id in selected_nodes:
             entry = index.get(node_id)
             if not entry:
                 raise PlanningError(f"unknown tree node: {node_id}")
+            if truncated and entry.get("isDirectory"):
+                raise PlanningError(
+                    "truncated_tree: directory nodes are not allowed when "
+                    "treeStats.truncated=true; select concrete file nodes or re-fetch tree"
+                )
             for name in entry.get("mediaNames") or []:
                 key = str(name)
                 if key and key not in seen:
@@ -304,9 +385,45 @@ class DownloadPlanner:
         if not selected_files:
             raise PlanningError("selected nodes contain no media files")
 
-        details = candidate.get("details")
-        if not isinstance(details, dict):
-            details = {"share": {}, "list": []}
+        new_episodes = list(candidate.get("newEpisodes") or [])
+        update_mode = bool(candidate.get("updateMode") or new_episodes)
+        title_key = str(
+            candidate.get("titleKey")
+            or normalize_title_key(str(candidate.get("query") or ""))
+        )
+        if update_mode:
+            if not new_episodes:
+                raise PlanningError(
+                    "update_selection_required: candidate has updateMode but empty newEpisodes"
+                )
+            allowed = {_episode_tuple(item) for item in new_episodes}
+            default_season = None
+            seasons = {item[0] for item in allowed}
+            if len(seasons) == 1:
+                default_season = next(iter(seasons))
+            selected_keys = []
+            for name in selected_files:
+                key = extract_episode_key(
+                    name,
+                    title_key,
+                    default_season=default_season,
+                )
+                if key is None:
+                    raise PlanningError(
+                        f"update_selection_invalid: cannot map file to episode: {name}"
+                    )
+                selected_keys.append(key)
+                if (key.season, key.episode, key.special) not in allowed:
+                    raise PlanningError(
+                        "update_selection_invalid: selected files must be a subset of newEpisodes"
+                    )
+            # Drop any non-video leftovers if somehow present.
+            selected_files = [
+                name
+                for name in selected_files
+                if name.casefold().endswith(VIDEO_EXTENSIONS)
+            ] or selected_files
+
         # Prefer classification against the selected media only.
         selected_details = {
             "share": details.get("share") if isinstance(details.get("share"), dict) else {},
@@ -341,6 +458,8 @@ class DownloadPlanner:
             warnings.append("confirm_media_type")
         if self.path_exists(paths["final_path"]):
             warnings.append("final_path_exists")
+        if truncated:
+            warnings.append("truncated_tree_file_selection")
         task = {
             "taskname": classification.title,
             "shareurl": transfer_shareurl,
@@ -365,11 +484,23 @@ class DownloadPlanner:
             }
             for job in transfer_jobs
         ]
+        expected_manifest = build_expected_manifest(
+            transfer_jobs=transfer_jobs,
+            selected_files=selected_files,
+            title_key=title_key or normalize_title_key(classification.title),
+            new_episodes=new_episodes if update_mode else None,
+            default_season=classification.season,
+        )
         incremental = {
             "existingEpisodes": list(candidate.get("existingEpisodes", [])),
-            "newEpisodes": list(candidate.get("newEpisodes", [])),
+            "newEpisodes": (
+                list(expected_manifest["expectedEpisodeKeys"])
+                if update_mode
+                else list(candidate.get("newEpisodes", []))
+            ),
             "selectedFiles": selected_files,
             "selectedNodes": selected_nodes,
+            "updateMode": update_mode,
         }
         classification_data = {
             "mediaType": classification.media_type,
@@ -401,6 +532,7 @@ class DownloadPlanner:
             "stagingPath": paths["staging_path"],
             "finalPath": paths["final_path"],
             "incremental": incremental,
+            "expectedManifest": expected_manifest,
             "task": task,
             "transferTasks": transfer_tasks,
             "warnings": warnings,
@@ -416,6 +548,7 @@ class DownloadPlanner:
             "finalPath": paths["final_path"],
             "cloudPath": paths["cloud_path"],
             "incremental": incremental,
+            "expectedManifest": expected_manifest,
             "warnings": warnings,
             "requiresConfirmation": bool(warnings),
             "transferJobCount": len(transfer_tasks),
@@ -434,6 +567,11 @@ class DownloadPlanner:
             raise PlanningError(str(error)) from None
 
         classification = plan["classification"]
+        expected_manifest = plan.get("expectedManifest") or {}
+        episode_keys = list(
+            expected_manifest.get("expectedEpisodeKeys")
+            or plan.get("incremental", {}).get("newEpisodes", [])
+        )
         task_record = {
             "task_id": plan["taskId"],
             "title": classification["title"],
@@ -444,9 +582,8 @@ class DownloadPlanner:
             "media_type": classification["mediaType"],
             "qas_task_name": plan["task"]["taskname"],
             "aria2_gids": [],
-            "episode_keys": list(
-                plan.get("incremental", {}).get("newEpisodes", [])
-            ),
+            "episode_keys": episode_keys,
+            "expected_manifest": expected_manifest,
             "aria2_dir": f"/nas/{plan['task']['addition']['aria2']['save_path']}",
             "staging_path": plan["stagingPath"],
             "final_path": plan["finalPath"],
@@ -455,9 +592,22 @@ class DownloadPlanner:
         self.store.upsert_task(task_record)
         try:
             staging = Path(plan["stagingPath"])
+            if self.path_guard is not None:
+                try:
+                    resolved = self.path_guard.resolve_target(str(staging))
+                    self.path_guard.assert_mutable(resolved)
+                except PathGuardError as error:
+                    raise PlanningError(f"unsafe staging path: {error}") from None
+                incoming = self.incoming_root.resolve(strict=False)
+                if not resolved.is_relative_to(incoming):
+                    raise PlanningError(
+                        "unsafe staging path: must be under downloads/.incoming/<task-id>"
+                    )
+                staging = resolved
             staging.mkdir(parents=True, exist_ok=True)
             try:
-                os.chmod(staging, 0o777)
+                # Writable by service account + aria2 group; avoid world-writable 0777.
+                os.chmod(staging, 0o775)
             except OSError:
                 pass
             if plan["action"] == "subscribe":
@@ -477,6 +627,9 @@ class DownloadPlanner:
                 "action": plan["action"],
                 "transferJobCount": len(transfer_tasks),
                 "stagingPath": plan["stagingPath"],
+                "expectedFileCount": int(
+                    expected_manifest.get("expectedFileCount") or 0
+                ),
             }
         except PlanningError:
             task_record["status"] = "failed"

@@ -55,6 +55,7 @@ class StateStore:
               qas_task_name TEXT,
               aria2_gids_json TEXT NOT NULL DEFAULT '[]',
               episode_keys_json TEXT NOT NULL DEFAULT '[]',
+              expected_manifest_json TEXT NOT NULL DEFAULT '{}',
               aria2_dir TEXT NOT NULL DEFAULT '',
               staging_path TEXT NOT NULL,
               final_path TEXT NOT NULL,
@@ -64,6 +65,8 @@ class StateStore:
             );
             """
         )
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA busy_timeout=5000")
         columns = {
             row["name"]
             for row in self.connection.execute(
@@ -96,6 +99,17 @@ class StateStore:
             self.connection.execute(
                 "ALTER TABLE tasks ADD COLUMN episode_keys_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if "expected_manifest_json" not in columns:
+            self.connection.execute(
+                "ALTER TABLE tasks ADD COLUMN expected_manifest_json "
+                "TEXT NOT NULL DEFAULT '{}'"
+            )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_title_status
+            ON tasks(title_key, status)
+            """
+        )
         for row in self.connection.execute(
             "SELECT plan_id, payload_json FROM plans WHERE payload_hash = ''"
         ).fetchall():
@@ -247,13 +261,18 @@ class StateStore:
         now = int(self.clock())
         gids = list(task.get("aria2_gids", []))
         episode_keys = list(task.get("episode_keys", []))
+        expected_manifest = task.get("expected_manifest")
+        if expected_manifest is None:
+            expected_manifest = {}
+        if not isinstance(expected_manifest, dict):
+            raise PlanError("expected_manifest must be an object")
         self.connection.execute(
             """
             INSERT INTO tasks (
               task_id, title, title_key, media_type, qas_task_name,
-              aria2_gids_json, episode_keys_json, aria2_dir,
-              staging_path, final_path, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              aria2_gids_json, episode_keys_json, expected_manifest_json,
+              aria2_dir, staging_path, final_path, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
               title = excluded.title,
               title_key = excluded.title_key,
@@ -261,6 +280,7 @@ class StateStore:
               qas_task_name = excluded.qas_task_name,
               aria2_gids_json = excluded.aria2_gids_json,
               episode_keys_json = excluded.episode_keys_json,
+              expected_manifest_json = excluded.expected_manifest_json,
               aria2_dir = excluded.aria2_dir,
               staging_path = excluded.staging_path,
               final_path = excluded.final_path,
@@ -275,6 +295,7 @@ class StateStore:
                 task.get("qas_task_name"),
                 json.dumps(gids, separators=(",", ":")),
                 json.dumps(episode_keys, separators=(",", ":")),
+                json.dumps(expected_manifest, ensure_ascii=False, separators=(",", ":")),
                 task.get("aria2_dir", ""),
                 task["staging_path"],
                 task["final_path"],
@@ -294,24 +315,39 @@ class StateStore:
             params = states
         sql += " ORDER BY created_at DESC, task_id"
         rows = self.connection.execute(sql, params).fetchall()
-        return [
-            {
-                "task_id": row["task_id"],
-                "title": row["title"],
-                "title_key": row["title_key"],
-                "media_type": row["media_type"],
-                "qas_task_name": row["qas_task_name"],
-                "aria2_gids": json.loads(row["aria2_gids_json"]),
-                "episode_keys": json.loads(row["episode_keys_json"]),
-                "aria2_dir": row["aria2_dir"],
-                "staging_path": row["staging_path"],
-                "final_path": row["final_path"],
-                "status": row["status"],
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-            }
-            for row in rows
-        ]
+        results = []
+        for row in rows:
+            keys = row.keys()
+            manifest_raw = (
+                row["expected_manifest_json"]
+                if "expected_manifest_json" in keys
+                else "{}"
+            )
+            try:
+                expected_manifest = json.loads(manifest_raw or "{}")
+            except json.JSONDecodeError:
+                expected_manifest = {}
+            results.append(
+                {
+                    "task_id": row["task_id"],
+                    "title": row["title"],
+                    "title_key": row["title_key"],
+                    "media_type": row["media_type"],
+                    "qas_task_name": row["qas_task_name"],
+                    "aria2_gids": json.loads(row["aria2_gids_json"]),
+                    "episode_keys": json.loads(row["episode_keys_json"]),
+                    "expected_manifest": expected_manifest
+                    if isinstance(expected_manifest, dict)
+                    else {},
+                    "aria2_dir": row["aria2_dir"],
+                    "staging_path": row["staging_path"],
+                    "final_path": row["final_path"],
+                    "status": row["status"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return results
 
     def get_task(self, task_id: str) -> dict | None:
         return next(

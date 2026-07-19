@@ -41,11 +41,24 @@ def _int(value) -> int:
 
 
 def _aggregate_aria_status(items: list[dict]) -> str:
-    """Prefer live/complete over error when GIDs are mixed (retries leave error rows)."""
+    """Aggregate multi-GID aria2 status.
+
+    ``complete`` requires *every* GID to be complete. Mixed complete+error becomes
+    ``partial_failed`` so validate/organize cannot treat a half-success as done.
+    Live states still win over terminal ones.
+    """
+    if not items:
+        return "submitted"
     statuses = {str(item.get("status", "")) for item in items}
-    for status in ("active", "waiting", "paused", "complete", "error"):
+    for status in ("active", "waiting", "paused"):
         if status in statuses:
             return status
+    if statuses and statuses <= {"complete"}:
+        return "complete"
+    if "error" in statuses and "complete" in statuses:
+        return "partial_failed"
+    if "error" in statuses:
+        return "error"
     return "submitted"
 
 
@@ -154,7 +167,7 @@ class ResourceAgent:
         if "18" in error_codes:
             notes.append(
                 "aria2_error_18: Download aborted - often missing/unwritable "
-                "staging dir under /volume2/downloads/.incoming (chmod 777) "
+                "staging dir under /volume2/downloads/.incoming (chmod 775) "
                 "or Quark/QAS failed to push files"
             )
         if task["status"] == "error" and staging_files == 0 and not staging_exists:
@@ -162,9 +175,12 @@ class ResourceAgent:
                 "staging_missing: aria2 target dir was never created on disk"
             )
         mixed = {str(item.get("status", "")) for item in items}
-        if "complete" in mixed and "error" in mixed:
+        if task["status"] == "partial_failed" or (
+            "complete" in mixed and "error" in mixed
+        ):
             notes.append(
-                "aria2_mixed: some GIDs complete, some error - check staging files"
+                "aria2_partial_failed: not all GIDs complete - "
+                "task cannot validate/organize until every transfer finishes"
             )
         return {
             "taskId": task["task_id"],
@@ -279,30 +295,115 @@ class ResourceAgent:
                     "nextAction": "fix_path_permissions",
                     "error": f"staging path is not writable: {root}",
                 }
+        probe = self._probe_aria2_write(staging_roots[0] if staging_roots else None)
+        if not probe.get("ok"):
+            return probe
         return {
             "ok": True,
             "nextAction": "ready",
-            "data": {"aria2Version": aria_version.get("version")},
+            "data": {
+                "aria2Version": aria_version.get("version"),
+                "aria2WriteProbe": probe.get("data"),
+            },
         }
 
+    def _probe_aria2_write(self, staging_root: Path | None) -> dict:
+        """Create a staging dir OpenClaw can write, ask aria2 to drop a tiny file."""
+        if staging_root is None or not hasattr(self.aria, "add_uri"):
+            return {"ok": True, "data": {"skipped": True}}
+        probe_dir = staging_root / f".check-ready-{os.getpid()}"
+        probe_name = "openclaw-aria2-probe.txt"
+        probe_file = probe_dir / probe_name
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(probe_dir, 0o775)
+            except OSError:
+                pass
+            # data URI avoids network; aria2 writes the decoded bytes into dir.
+            gid = self.aria.add_uri(
+                ["data:text/plain,openclaw-aria2-probe"],
+                options={
+                    "dir": str(probe_dir),
+                    "out": probe_name,
+                    "follow-torrent": "false",
+                },
+            )
+            # Brief poll for file appearance.
+            import time as _time
 
-def _load_runtime():
+            deadline = _time.time() + 8
+            while _time.time() < deadline:
+                if probe_file.is_file() and probe_file.stat().st_size > 0:
+                    break
+                _time.sleep(0.25)
+            visible = probe_file.is_file() and probe_file.stat().st_size > 0
+            try:
+                if gid:
+                    self.aria.remove_result(str(gid))
+            except Exception:
+                pass
+            if not visible:
+                return {
+                    "ok": False,
+                    "nextAction": "fix_aria2_path_mapping",
+                    "error": (
+                        "aria2 write probe failed: OpenClaw staging is writable "
+                        "but aria2 did not create the probe file (path map / uid)"
+                    ),
+                }
+            return {
+                "ok": True,
+                "data": {"probeFile": probe_name, "gid": str(gid)},
+            }
+        except Exception as error:
+            return {
+                "ok": False,
+                "nextAction": "fix_aria2_path_mapping",
+                "error": f"aria2 write probe failed: {error}",
+            }
+        finally:
+            try:
+                if probe_file.exists():
+                    probe_file.unlink()
+                if probe_dir.exists():
+                    probe_dir.rmdir()
+            except OSError:
+                pass
+
+
+def _load_runtime(command: str | None = None):
     base_dir = Path(__file__).resolve().parents[1]
     with open(
         base_dir / "config" / "routing.json",
         encoding="utf-8",
     ) as routing_file:
         routing = json.load(routing_file)
-    required = [
-        "QAS_BASE_URL",
-        "QAS_TOKEN",
-        "PANSOU_BASE_URL",
-        "ARIA2_RPC_URL",
-        "ARIA2_RPC_SECRET",
-    ]
+
+    needs_qas = command in {
+        None,
+        "check-ready",
+        "search",
+        "share",
+        "import-url",
+        "preview",
+        "tree",
+        "plan",
+        "execute",
+    }
+    needs_aria = command in {None, "check-ready", "downloads", "execute"}
+    # PanSou is optional supplemental discovery; never hard-required.
+    needs_pansou = command in {None, "search"}
+
+    required = []
+    if needs_qas:
+        required.extend(["QAS_BASE_URL", "QAS_TOKEN"])
+    if needs_aria:
+        required.extend(["ARIA2_RPC_URL", "ARIA2_RPC_SECRET"])
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         raise AgentError(f"missing environment: {', '.join(missing)}")
+
     state_path = Path(
         os.environ.get(
             "RESOURCE_AGENT_STATE_DB",
@@ -310,23 +411,56 @@ def _load_runtime():
         )
     )
     store = StateStore(state_path)
-    qas = QasClient(os.environ["QAS_BASE_URL"], os.environ["QAS_TOKEN"])
-    pansou = PanSouClient(
-        os.environ["PANSOU_BASE_URL"],
-        max_candidates=_pansou_limit(
-            os.environ.get("PANSOU_MAX_CANDIDATES")
-        ),
-    )
-    jiaofu = _optional_jiaofu(base_dir)
-    aria = Aria2Client(
-        os.environ["ARIA2_RPC_URL"],
-        os.environ["ARIA2_RPC_SECRET"],
-    )
-    planner = DownloadPlanner(
-        qas=qas,
-        store=store,
-        routing=routing,
-    )
+    qas = None
+    aria = None
+    pansou = None
+    planner = None
+    if needs_qas:
+        qas = QasClient(os.environ["QAS_BASE_URL"], os.environ["QAS_TOKEN"])
+    if needs_aria:
+        aria = Aria2Client(
+            os.environ["ARIA2_RPC_URL"],
+            os.environ["ARIA2_RPC_SECRET"],
+        )
+    if needs_pansou and os.environ.get("PANSOU_BASE_URL"):
+        pansou = PanSouClient(
+            os.environ["PANSOU_BASE_URL"],
+            max_candidates=_pansou_limit(
+                os.environ.get("PANSOU_MAX_CANDIDATES")
+            ),
+        )
+    jiaofu = _optional_jiaofu(base_dir) if needs_qas or command == "search" else None
+    if needs_qas and qas is not None:
+        from routing_paths import path_guard_roots
+
+        allowed, protected = path_guard_roots(routing)
+        # PathGuard resolve requires existing roots; skip guard when absent in unit envs.
+        existing_allowed = []
+        existing_protected = []
+        for root in allowed:
+            try:
+                existing_allowed.append(root.resolve(strict=True))
+            except OSError:
+                continue
+        for root in protected:
+            try:
+                resolved = root.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved in existing_allowed:
+                existing_protected.append(resolved)
+        guard = None
+        if existing_allowed and set(existing_protected).issubset(set(existing_allowed)):
+            try:
+                guard = PathGuard(existing_allowed, protected_roots=existing_protected)
+            except Exception:
+                guard = None
+        planner = DownloadPlanner(
+            qas=qas,
+            store=store,
+            routing=routing,
+            path_guard=guard,
+        )
     return routing, store, qas, aria, planner, pansou, jiaofu
 
 
@@ -362,6 +496,12 @@ def parse_args(argv) -> argparse.Namespace:
     share_open = share_sub.add_parser("open")
     share_open.add_argument("url")
     share_open.add_argument(
+        "--media-type",
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
+    )
+    import_url = subparsers.add_parser("import-url")
+    import_url.add_argument("url")
+    import_url.add_argument(
         "--media-type",
         choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
     )
@@ -482,35 +622,37 @@ def _ffprobe_runner(path: Path) -> bool:
 
 
 def _default_organizer_factory(routing, store):
-    downloads_root = Path(routing["downloads"]["root"])
-    protected_roots = [
-        Path("/volume2/影视"),
-        Path("/volume3/临时影视"),
-    ]
-    roots = [
-        downloads_root,
-        *protected_roots,
-        *[
-            Path(route["final_root"])
-            for route in routing.values()
-            if isinstance(route, dict) and route.get("final_root")
-        ],
-    ]
+    from routing_paths import (
+        downloads_root as routing_downloads_root,
+        organizing_root as routing_organizing_root,
+        path_guard_roots,
+    )
+
+    downloads = routing_downloads_root(routing)
+    org_root = routing_organizing_root(routing)
+    allowed, protected = path_guard_roots(routing)
+    # Ensure roots exist for PathGuard strict resolve in production.
+    for root in (*allowed, org_root, downloads / ".incoming", downloads / ".ready", downloads / ".quarantine"):
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
     guard = PathGuard(
-        roots,
-        protected_roots=protected_roots,
+        allowed,
+        protected_roots=protected,
     )
     validator = DownloadValidator(
         store,
         guard,
-        downloads_root,
+        downloads,
         ffprobe_runner=_ffprobe_runner,
     )
     return Organizer(
         store,
         guard,
-        downloads_root,
+        downloads,
         validator=validator,
+        organizing_root=org_root,
     )
 
 
@@ -526,9 +668,23 @@ def main(
     store = None
     try:
         args = parse_args(arguments)
-        routing, store, qas, aria, planner, pansou, jiaofu = runtime_loader()
+        try:
+            loaded = runtime_loader(args.command)
+        except TypeError:
+            loaded = runtime_loader()
+        routing, store, qas, aria, planner, pansou, jiaofu = loaded
         agent = ResourceAgent(store=store, qas=qas, aria=aria)
-        service = service_factory(routing, store, qas, pansou, jiaofu)
+        service = None
+        if args.command in {
+            "library",
+            "search",
+            "share",
+            "import-url",
+            "preview",
+            "tree",
+            "plan",
+        }:
+            service = service_factory(routing, store, qas, pansou, jiaofu)
         if args.command == "check-ready":
             roots = [
                 Path(route["staging_root"])
@@ -565,9 +721,10 @@ def main(
                 getattr(args, "media_type", None),
                 update=getattr(args, "update", False),
             )
-        elif args.command == "share":
+        elif args.command in {"share", "import-url"}:
+            url = args.url
             result = service.open_share(
-                args.url,
+                url,
                 getattr(args, "media_type", None),
             )
         elif args.command == "preview":
@@ -629,6 +786,7 @@ def main(
         elif args.download_command == "validate":
             organizer = organizer_factory(routing, store)
             report = organizer.validator.validate(args.task_id)
+            task = store.get_task(args.task_id) or {}
             result = success(
                 {
                     "taskId": args.task_id,
@@ -636,6 +794,13 @@ def main(
                     "problems": list(report.problems),
                     "fileCount": len(report.manifest),
                     "totalBytes": sum(report.manifest.values()),
+                    "stagingPath": task.get("staging_path"),
+                    "status": task.get("status"),
+                    **(
+                        {"relocatedPath": report.relocated_path}
+                        if report.relocated_path
+                        else {}
+                    ),
                 },
                 terminal=True,
                 next_action=report.next_action,

@@ -80,6 +80,19 @@ class MediaCtlContractTests(unittest.TestCase):
         self.assertEqual(args.url, "https://pan.quark.cn/s/abcShare01")
         self.assertEqual(args.media_type, "anime")
 
+    def test_parser_supports_import_url(self):
+        args = parse_args(
+            [
+                "import-url",
+                "https://pan.quark.cn/s/abcShare01",
+                "--media-type",
+                "drama",
+            ]
+        )
+        self.assertEqual(args.command, "import-url")
+        self.assertEqual(args.url, "https://pan.quark.cn/s/abcShare01")
+        self.assertEqual(args.media_type, "drama")
+
     def test_parser_supports_plan_download_media_type(self):
         args = parse_args(
             [

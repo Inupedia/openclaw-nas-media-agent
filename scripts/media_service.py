@@ -331,6 +331,7 @@ class MediaService:
                     "selectedFiles": selection["files"],
                     "existingEpisodes": self._serialize_episodes(local_keys),
                     "newEpisodes": serialized_missing,
+                    "updateMode": True,
                     "specification": specification,
                 }
             )

@@ -46,6 +46,13 @@
     "staging_root": "/volume2/downloads/.incoming",
     "ready_root": "/volume2/downloads/.ready",
     "quarantine_root": "/volume2/downloads/.quarantine"
+  },
+  "paths": {
+    "protected_roots": [
+      "/volume2/影视",
+      "/volume3/临时影视"
+    ],
+    "organizing_root": "/volume3/.openclaw-organizing"
   }
 }
 

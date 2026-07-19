@@ -103,3 +103,9 @@ class Aria2Client:
 
     def remove_result(self, gid: str) -> str:
         return str(self._call("removeDownloadResult", [gid]))
+
+    def add_uri(self, uris: list[str], *, options: dict | None = None) -> str:
+        params: list = [list(uris)]
+        if options:
+            params.append(dict(options))
+        return str(self._call("addUri", params))

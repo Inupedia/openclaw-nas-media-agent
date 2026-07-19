@@ -166,7 +166,7 @@ class ResourceAgentTests(unittest.TestCase):
 
         self.assertEqual(self.aria.calls, [("remove_result", "abc")])
 
-    def test_mixed_complete_and_error_prefers_complete(self):
+    def test_mixed_complete_and_error_is_partial_failed(self):
         self.aria.stopped = [
             {
                 "gid": "ok",
@@ -193,13 +193,13 @@ class ResourceAgentTests(unittest.TestCase):
 
         result = self.agent.downloads_list()["tasks"][0]
 
-        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["status"], "partial_failed")
         self.assertIn("18", result["errorCodes"])
         self.assertTrue(
             any("aria2_error_18" in note for note in result["notes"])
         )
         self.assertTrue(
-            any("aria2_mixed" in note for note in result["notes"])
+            any("aria2_partial_failed" in note for note in result["notes"])
         )
 
     def test_error_18_notes_when_staging_missing(self):

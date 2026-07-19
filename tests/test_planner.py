@@ -625,3 +625,91 @@ class PlannerTests(unittest.TestCase):
         plan = planner.plan_selected(candidate_id, node_ids=["n-s01"])
         with self.assertRaisesRegex(PlanningError, "transferred nothing"):
             planner.execute(plan["planId"], confirmed=True)
+
+    def test_update_mode_rejects_files_outside_new_episodes(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Show",
+                "mediaType": "tv",
+                "titleKey": "show",
+                "updateMode": True,
+                "shareurl": "https://pan.quark.cn/s/show",
+                "candidate": {"taskname": "Show"},
+                "details": {"share": {"title": "Show"}, "list": []},
+                "treeIndex": {
+                    "n-dir": {
+                        "nodeId": "n-dir",
+                        "name": "Season 1",
+                        "isDirectory": True,
+                        "mediaNames": [
+                            "Show.S01E01.mkv",
+                            "Show.S01E02.mkv",
+                        ],
+                    }
+                },
+                "newEpisodes": [{"season": 1, "episode": 2}],
+            }
+        )
+        with self.assertRaisesRegex(PlanningError, "update_selection_invalid"):
+            self.make_planner(FakeQas()).plan_selected(
+                candidate_id,
+                node_ids=["n-dir"],
+            )
+
+    def test_truncated_tree_rejects_directory_nodes(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Show",
+                "shareurl": "https://pan.quark.cn/s/show",
+                "candidate": {"taskname": "Show"},
+                "details": {
+                    "share": {"title": "Show"},
+                    "list": [],
+                    "treeStats": {"truncated": True},
+                },
+                "treeIndex": {
+                    "n-dir": {
+                        "nodeId": "n-dir",
+                        "name": "Season 1",
+                        "isDirectory": True,
+                        "mediaNames": ["Show.S01E01.mkv"],
+                    }
+                },
+            }
+        )
+        with self.assertRaisesRegex(PlanningError, "truncated_tree"):
+            self.make_planner(FakeQas()).plan_selected(
+                candidate_id,
+                node_ids=["n-dir"],
+            )
+
+    def test_plan_selected_embeds_expected_manifest(self):
+        candidate_id = self.store.create_candidate(
+            {
+                "query": "Show",
+                "shareurl": "https://pan.quark.cn/s/show",
+                "candidate": {"taskname": "Show"},
+                "details": {"share": {"title": "Show"}, "list": []},
+                "treeIndex": {
+                    "n-file": {
+                        "nodeId": "n-file",
+                        "name": "Show.S01E01.mkv",
+                        "isDirectory": False,
+                        "mediaNames": ["Show.S01E01.mkv"],
+                    }
+                },
+            }
+        )
+        result = self.make_planner(FakeQas()).plan_selected(
+            candidate_id,
+            node_ids=["n-file"],
+        )
+        manifest = result["expectedManifest"]
+        self.assertEqual(manifest["expectedFileNames"], ["Show.S01E01.mkv"])
+        self.assertEqual(manifest["expectedFileCount"], 1)
+        self.assertEqual(manifest["transferJobCount"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

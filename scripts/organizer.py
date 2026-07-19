@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from episode_diff import extract_episode_key, normalize_title_key
 from path_guard import PathGuard, PathGuardError
 from state_store import PlanError, StateStore
 
@@ -33,6 +34,7 @@ class ValidationReport:
     next_action: str
     problems: tuple[str, ...]
     manifest: dict[str, int]
+    relocated_path: str | None = None
 
 
 class DownloadValidator:
@@ -43,6 +45,7 @@ class DownloadValidator:
         downloads_root: Path,
         *,
         ffprobe_runner: Callable[[Path], bool] | None = None,
+        relocate: bool = True,
     ):
         self.store = store
         self.guard = guard
@@ -50,20 +53,105 @@ class DownloadValidator:
         self.incoming_root = (
             self.downloads_root / ".incoming"
         ).resolve(strict=True)
+        self.ready_root = (
+            self.downloads_root / ".ready"
+        ).resolve(strict=True)
+        self.quarantine_root = (
+            self.downloads_root / ".quarantine"
+        ).resolve(strict=True)
         self.ffprobe_runner = ffprobe_runner
+        self.relocate = relocate
+
+    def _check_expected_manifest(
+        self,
+        task: dict,
+        source: Path,
+        videos: list[Path],
+        problems: list[str],
+    ) -> None:
+        expected = task.get("expected_manifest") or {}
+        if not isinstance(expected, dict) or not expected:
+            return
+        expected_names = [
+            str(name) for name in (expected.get("expectedFileNames") or []) if name
+        ]
+        if not expected_names:
+            return
+        present = {path.name for path in videos}
+        missing = [name for name in expected_names if name not in present]
+        if missing:
+            problems.append("expected_files_missing")
+        expected_count = int(expected.get("expectedFileCount") or len(expected_names))
+        if len(videos) < expected_count:
+            problems.append("expected_file_count_mismatch")
+        expected_jobs = int(expected.get("transferJobCount") or 0)
+        if expected_jobs > 1 and len(videos) < expected_count:
+            problems.append("transfer_jobs_incomplete")
+        episode_keys = list(expected.get("expectedEpisodeKeys") or [])
+        if episode_keys:
+            title_key = str(task.get("title_key") or normalize_title_key(task["title"]))
+            seasons = {int(item["season"]) for item in episode_keys}
+            default_season = next(iter(seasons)) if len(seasons) == 1 else None
+            found = set()
+            for path in videos:
+                key = extract_episode_key(
+                    path.name,
+                    title_key,
+                    default_season=default_season,
+                )
+                if key is not None:
+                    found.add((key.season, key.episode, key.special))
+            wanted = {
+                (
+                    int(item["season"]),
+                    int(item["episode"]),
+                    item.get("special"),
+                )
+                for item in episode_keys
+            }
+            if not wanted.issubset(found):
+                problems.append("expected_episodes_missing")
+
+    def _relocate_source(
+        self,
+        task: dict,
+        source: Path,
+        *,
+        ok: bool,
+    ) -> str | None:
+        if not self.relocate:
+            return None
+        if not source.is_relative_to(self.incoming_root):
+            return None
+        target_root = self.ready_root if ok else self.quarantine_root
+        target = self.guard.resolve_target(str(target_root / task["task_id"]))
+        self.guard.assert_mutable(target)
+        if target.exists():
+            raise OrganizeError(
+                f"{'ready' if ok else 'quarantine'} target exists"
+            )
+        target_root.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        task["staging_path"] = str(target)
+        task["status"] = "ready" if ok else "quarantined"
+        self.store.upsert_task(task)
+        return str(target)
 
     def validate(self, task_id: str) -> ValidationReport:
         task = self.store.get_task(task_id)
         if task is None:
             raise OrganizeError("task not found")
         problems = []
-        if task["status"] != "complete":
+        if task["status"] not in {"complete", "ready", "quarantined"}:
             problems.append("task_not_complete")
         try:
             source = self.guard.resolve_existing(task["staging_path"])
         except PathGuardError as error:
             raise OrganizeError(str(error)) from None
-        if not source.is_relative_to(self.incoming_root):
+        in_incoming = source.is_relative_to(self.incoming_root)
+        in_ready = source.is_relative_to(self.ready_root)
+        in_quarantine = source.is_relative_to(self.quarantine_root)
+        if not (in_incoming or in_ready or in_quarantine):
             problems.append("source_not_in_incoming")
 
         manifest = {}
@@ -95,16 +183,30 @@ class DownloadValidator:
                 if video.stat().st_size and not self.ffprobe_runner(video):
                     problems.append("unreadable_video")
                     break
+        self._check_expected_manifest(task, source, videos, problems)
         unique_problems = tuple(sorted(set(problems)))
+        ok = not unique_problems
+        relocated = None
+        if task["status"] == "complete" and in_incoming and (
+            "task_not_complete" not in unique_problems
+        ):
+            # Only relocate when aria2 reported complete and path checks ran.
+            try:
+                relocated = self._relocate_source(task, source, ok=ok)
+            except OrganizeError:
+                raise
+            except Exception as error:
+                raise OrganizeError(f"validate relocate failed: {error}") from None
         return ValidationReport(
-            ok=not unique_problems,
+            ok=ok,
             next_action=(
                 "ready_to_organize"
-                if not unique_problems
+                if ok
                 else "quarantine_download"
             ),
             problems=unique_problems,
             manifest=manifest,
+            relocated_path=relocated,
         )
 
 
@@ -116,6 +218,7 @@ class Organizer:
         downloads_root: Path,
         *,
         validator: DownloadValidator,
+        organizing_root: Path | None = None,
         same_filesystem: Callable[[Path, Path], bool] | None = None,
         copy_verifier: Callable[[Path, Path, dict[str, int]], bool] | None = None,
         fsync_tree: Callable[[Path], None] | None = None,
@@ -129,6 +232,11 @@ class Organizer:
         self.ready_root = (
             self.downloads_root / ".ready"
         ).resolve(strict=True)
+        self.organizing_root = (
+            Path(organizing_root).resolve(strict=False)
+            if organizing_root is not None
+            else (self.downloads_root / ".organizing").resolve(strict=False)
+        )
         self.validator = validator
         self.same_filesystem = same_filesystem or self._same_filesystem
         self.copy_verifier = copy_verifier or self._verify_manifest
@@ -179,7 +287,7 @@ class Organizer:
         task = self.store.get_task(task_id)
         if task is None:
             raise OrganizeError("task not found")
-        if task["status"] != "complete":
+        if task["status"] not in {"complete", "ready"}:
             raise OrganizeError("task is not complete")
         final_path = self.guard.resolve_target(task["final_path"])
         self.guard.assert_mutable(final_path)
@@ -190,13 +298,15 @@ class Organizer:
             raise OrganizeError(
                 "download validation failed: " + ",".join(report.problems)
             )
+        task = self.store.get_task(task_id) or task
         ready_path = self.guard.resolve_target(
             str(self.ready_root / task_id)
         )
+        source_path = report.relocated_path or task["staging_path"]
         payload = {
             "schemaVersion": 1,
             "taskId": task_id,
-            "sourcePath": task["staging_path"],
+            "sourcePath": source_path,
             "readyPath": str(ready_path),
             "finalPath": str(final_path),
             "manifest": report.manifest,
@@ -206,7 +316,7 @@ class Organizer:
         return {
             "planId": plan_id,
             "taskId": task_id,
-            "sourcePath": task["staging_path"],
+            "sourcePath": source_path,
             "finalPath": str(final_path),
             "fileCount": len(report.manifest),
             "totalBytes": sum(report.manifest.values()),
@@ -251,8 +361,9 @@ class Organizer:
             self.guard.assert_deletable(source)
             os.replace(source, final_path)
         else:
+            self.organizing_root.mkdir(parents=True, exist_ok=True)
             hidden_target = self.guard.resolve_target(
-                str(final_path.parent / f".organizing-{plan['taskId']}")
+                str(self.organizing_root / f".organizing-{plan['taskId']}")
             )
             self.guard.assert_mutable(hidden_target)
             if hidden_target.exists():
@@ -273,10 +384,11 @@ class Organizer:
                 if hidden_target.exists():
                     try:
                         self.guard.assert_deletable(hidden_target)
+                        shutil.rmtree(hidden_target)
                     except PathGuardError:
                         pass
-                    else:
-                        shutil.rmtree(hidden_target)
+                    except OSError:
+                        pass
                 raise
 
         task["staging_path"] = str(source)
