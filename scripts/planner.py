@@ -686,6 +686,8 @@ class DownloadPlanner:
             "episode_keys": episode_keys,
             "expected_manifest": expected_manifest,
             "aria2_dir": f"/nas/{plan['task']['addition']['aria2']['save_path']}",
+            "cloud_path": str(plan.get("cloudPath") or plan["task"].get("savepath") or ""),
+            "recover_attempts": 0,
             "staging_path": plan["stagingPath"],
             "final_path": plan["finalPath"],
             "status": "starting",
@@ -707,8 +709,8 @@ class DownloadPlanner:
                 staging = resolved
             staging.mkdir(parents=True, exist_ok=True)
             try:
-                # Writable by service account + aria2 group; avoid world-writable 0777.
-                os.chmod(staging, 0o775)
+                # aria2c usually runs as nobody; keep task dirs world-writable.
+                os.chmod(staging, 0o777)
             except OSError:
                 pass
             if plan["action"] == "subscribe":

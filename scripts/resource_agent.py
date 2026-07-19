@@ -16,8 +16,12 @@ from pansou_client import PanSouClient
 from jiaofu_client import JiaofuClient, JiaofuError
 from path_guard import PathGuard
 from planner import DownloadPlanner, PlanningError
+from quark_client import USER_AGENT, QuarkClient
 from qas_client import ClientError, QasClient
 from state_store import PlanError, StateStore
+
+
+MAX_QUARK_RECOVER_ATTEMPTS = 2
 
 
 class AgentError(RuntimeError):
@@ -38,6 +42,24 @@ def _int(value) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _qas_cookie(config: dict | None) -> str:
+    """Normalize QAS `/data` cookie field.
+
+    QAS stores cookie as a one-item list of strings (or dicts with a ``cookie``
+    key). ``str(list)`` produces an invalid Cookie header and Quark returns 500.
+    """
+    if not isinstance(config, dict):
+        return ""
+    raw = config.get("cookie")
+    if isinstance(raw, list):
+        if not raw:
+            return ""
+        raw = raw[0]
+    if isinstance(raw, dict):
+        raw = raw.get("cookie")
+    return str(raw or "").strip()
 
 
 def _aggregate_aria_status(items: list[dict]) -> str:
@@ -142,7 +164,145 @@ class ResourceAgent:
             ]
             task["status"] = _aggregate_aria_status(items)
             self.store.upsert_task(task)
+            if self._should_auto_recover_quark(task, items):
+                try:
+                    recovered = self.recover_quark_download(task["task_id"])
+                    new_dir = str(recovered.get("aria2Dir") or task["aria2_dir"]).rstrip(
+                        "/"
+                    )
+                    recovered_gids = {
+                        str(gid) for gid in (recovered.get("aria2Gids") or [])
+                    }
+                    # Prefer newly pushed GIDs so stale error-16 results cannot
+                    # immediately overwrite the recovered active status.
+                    fresh = [
+                        item
+                        for item in self._aria_items()
+                        if str(item.get("dir", "")).rstrip("/") == new_dir
+                        and (
+                            not recovered_gids
+                            or str(item.get("gid") or "") in recovered_gids
+                        )
+                    ]
+                    by_dir[new_dir] = fresh
+                except Exception:
+                    # Keep original error status; notes explain next step.
+                    pass
         return by_dir
+
+    def _cloud_path_for_task(self, task: dict) -> str:
+        configured = str(task.get("cloud_path") or "").strip()
+        if configured:
+            return configured
+        media_type = str(task.get("media_type") or "other")
+        route = self.routing.get(media_type) if isinstance(self.routing, dict) else None
+        prefix = "/OpenClaw/TV"
+        if isinstance(route, dict) and route.get("cloud_prefix"):
+            prefix = str(route["cloud_prefix"]).rstrip("/")
+        return f"{prefix}/{task['task_id']}"
+
+    def _should_auto_recover_quark(self, task: dict, items: list[dict]) -> bool:
+        if self.qas is None:
+            return False
+        if int(task.get("recover_attempts") or 0) >= MAX_QUARK_RECOVER_ATTEMPTS:
+            return False
+        if not items:
+            return False
+        # All tracked downloads aborted at 0 bytes with aria2 code 16.
+        for item in items:
+            if str(item.get("errorCode") or "") != "16":
+                return False
+            if _int(item.get("completedLength")) > 0:
+                return False
+        staging = Path(task["staging_path"])
+        if staging.is_dir():
+            try:
+                if any(
+                    path.is_file() and path.suffix.casefold() not in {".aria2"}
+                    for path in staging.rglob("*")
+                ):
+                    return False
+            except OSError:
+                return False
+        return True
+
+    def recover_quark_download(self, task_id: str) -> dict:
+        """Re-push Quark cloud files into aria2 with Cookie headers."""
+        if self.qas is None:
+            raise AgentError("QAS is required to recover Quark downloads")
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise AgentError("task not found")
+        try:
+            config = self.qas.get_config()
+        except Exception as error:
+            raise AgentError(f"unable to read QAS config: {error}") from None
+        cookie = _qas_cookie(config)
+        if not cookie:
+            raise AgentError("QAS cookie is not configured")
+
+        cloud_path = self._cloud_path_for_task(task)
+        quark = QuarkClient(cookie)
+        files = quark.list_files(cloud_path)
+        if not files:
+            raise AgentError(f"no files found on Quark path {cloud_path}")
+
+        staging = Path(task["staging_path"])
+        try:
+            staging.mkdir(parents=True, exist_ok=True)
+            # aria2c typically runs as nobody; 775 root:root blocks writes.
+            os.chmod(staging, 0o777)
+        except OSError:
+            pass
+
+        # Drop failed zero-byte results so they stop dominating sync.
+        for gid in list(task.get("aria2_gids") or []):
+            try:
+                self.aria.remove_result(str(gid))
+            except Exception:
+                pass
+
+        entries = quark.download_entries([item["fid"] for item in files])
+        if not entries:
+            raise AgentError("Quark download URLs unavailable")
+
+        # Prefer download-response Set-Cookie when Quark rotates CDN auth.
+        aria_cookie = str(entries[0].get("cookie") or cookie).strip() or cookie
+
+        gids: list[str] = []
+        for entry in entries:
+            gid = self.aria.add_uri(
+                [entry["download_url"]],
+                options={
+                    "dir": task["aria2_dir"],
+                    "out": entry["name"],
+                    "header": [
+                        f"Cookie: {aria_cookie}",
+                        "Referer: https://pan.quark.cn/",
+                        f"User-Agent: {USER_AGENT}",
+                    ],
+                    "continue": "true",
+                    "allow-overwrite": "true",
+                    "max-connection-per-server": "1",
+                },
+            )
+            gids.append(str(gid))
+
+        task["cloud_path"] = cloud_path
+        task["aria2_gids"] = gids
+        task["status"] = "active"
+        task["recover_attempts"] = int(task.get("recover_attempts") or 0) + 1
+        self.store.upsert_task(task)
+        return {
+            "taskId": task_id,
+            "status": "active",
+            "cloudPath": cloud_path,
+            "recoveredFiles": len(entries),
+            "aria2Gids": gids,
+            "aria2Dir": task["aria2_dir"],
+            "recoverAttempts": task["recover_attempts"],
+            "note": "re-pushed Quark cloud files into aria2 with Cookie headers",
+        }
 
     def _summary(self, task: dict, items: list[dict]) -> dict:
         total = sum(_int(item.get("totalLength")) for item in items)
@@ -187,9 +347,25 @@ class ResourceAgent:
         if "18" in error_codes:
             notes.append(
                 "aria2_error_18: Download aborted - often missing/unwritable "
-                "staging dir under /volume2/downloads/.incoming (chmod 775) "
+                "staging dir under /volume2/downloads/.incoming (chmod 777) "
                 "or Quark/QAS failed to push files"
             )
+        if "16" in error_codes and staging_files == 0:
+            attempts = int(task.get("recover_attempts") or 0)
+            if attempts >= MAX_QUARK_RECOVER_ATTEMPTS:
+                notes.append(
+                    "aria2_error_16: auto Cookie re-push exhausted - file is usually "
+                    "already on Quark under /OpenClaw/...; run "
+                    "`downloads recover TASK_ID` after fixing QAS cookie, "
+                    "do not keep re-execute/plan"
+                )
+            else:
+                notes.append(
+                    "aria2_error_16: Download aborted at 0 bytes after Quark transfer - "
+                    "usually missing Cookie on aria2 push; auto-recover will re-push "
+                    "from Quark with Cookie on next downloads list/show "
+                    f"(attempt {attempts}/{MAX_QUARK_RECOVER_ATTEMPTS})"
+                )
         if task["status"] == "error" and staging_files == 0 and not staging_exists:
             notes.append(
                 "staging_missing: aria2 target dir was never created on disk"
@@ -294,7 +470,7 @@ class ResourceAgent:
                 "nextAction": "configure_qas",
                 "error": str(error),
             }
-        if not config.get("cookie"):
+        if not _qas_cookie(config):
             return {
                 "ok": False,
                 "nextAction": "configure_qas_cookie",
@@ -407,7 +583,7 @@ class ResourceAgent:
         try:
             probe_dir.mkdir(parents=True, exist_ok=True)
             try:
-                os.chmod(probe_dir, 0o775)
+                os.chmod(probe_dir, 0o777)
             except OSError:
                 pass
             try:
@@ -499,6 +675,12 @@ def _load_runtime(command: str | None = None):
     needs_aria = command in {None, "check-ready", "downloads", "execute"}
     # PanSou is optional supplemental discovery; never hard-required.
     needs_pansou = command in {None, "search"}
+    # downloads list/show can auto-recover error-16 using QAS cookie when present.
+    optional_qas_for_downloads = (
+        command == "downloads"
+        and bool(os.environ.get("QAS_BASE_URL"))
+        and bool(os.environ.get("QAS_TOKEN"))
+    )
 
     required = []
     if needs_qas:
@@ -520,7 +702,7 @@ def _load_runtime(command: str | None = None):
     aria = None
     pansou = None
     planner = None
-    if needs_qas:
+    if needs_qas or optional_qas_for_downloads:
         qas = QasClient(os.environ["QAS_BASE_URL"], os.environ["QAS_TOKEN"])
     if needs_aria:
         aria = Aria2Client(
@@ -655,6 +837,8 @@ def parse_args(argv) -> argparse.Namespace:
     downloads_sub.add_parser("list")
     show = downloads_sub.add_parser("show")
     show.add_argument("task_id")
+    recover = downloads_sub.add_parser("recover")
+    recover.add_argument("task_id")
     validate = downloads_sub.add_parser("validate")
     validate.add_argument("task_id")
     for command in ("pause", "resume", "cancel"):
@@ -893,6 +1077,11 @@ def main(
             result = success(
                 agent.downloads_show(args.task_id),
                 next_action="none",
+            )
+        elif args.download_command == "recover":
+            result = success(
+                agent.recover_quark_download(args.task_id),
+                next_action="monitor_download",
             )
         elif args.download_command == "validate":
             organizer = organizer_factory(routing, store)

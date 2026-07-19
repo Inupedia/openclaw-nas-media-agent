@@ -50,6 +50,7 @@
 ```text
 {baseDir}/bin/mediactl downloads list
 {baseDir}/bin/mediactl downloads show TASK_ID
+{baseDir}/bin/mediactl downloads recover TASK_ID
 {baseDir}/bin/mediactl downloads pause TASK_ID
 {baseDir}/bin/mediactl downloads resume TASK_ID
 {baseDir}/bin/mediactl downloads cancel TASK_ID
@@ -57,6 +58,8 @@
 ```
 
 只能控制 JSON 中出现的自有 `taskId`。取消默认保留已下载数据。
+
+`downloads list/show` 在遇到 aria2 error 16（0 字节中止）时，会自动从夸克带 Cookie 重推到 aria2（每任务最多 2 次）。仍失败时再用 `downloads recover`。
 
 ## 整理
 

@@ -308,12 +308,14 @@ bin/mediactl execute PLAN_ID --confirmed
 ```bash
 bin/mediactl downloads list
 bin/mediactl downloads show TASK_ID
+bin/mediactl downloads recover TASK_ID
 bin/mediactl downloads pause TASK_ID
 bin/mediactl downloads resume TASK_ID
 bin/mediactl downloads cancel TASK_ID
 bin/mediactl downloads validate TASK_ID
 ```
 
+`downloads list/show` 会在 aria2 error 16（夸克已转存但 0 字节中止，通常缺 Cookie）时自动带 Cookie 重推；耗尽后再用 `downloads recover`。
 整理：
 
 ```bash

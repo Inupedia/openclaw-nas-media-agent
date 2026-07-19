@@ -54,25 +54,44 @@ class FakeAria:
 
     def remove_result(self, gid):
         self.calls.append(("remove_result", gid))
+        gid = str(gid)
+        self.active = [item for item in self.active if str(item.get("gid")) != gid]
+        self.waiting = [item for item in self.waiting if str(item.get("gid")) != gid]
+        self.stopped = [item for item in self.stopped if str(item.get("gid")) != gid]
         return gid
 
     def add_uri(self, uris, *, options=None):
-        self.calls.append(("add_uri", list(uris), dict(options or {})))
+        options = dict(options or {})
+        gid = f"gid-{len(self.calls) + 1}"
+        self.calls.append(("add_uri", list(uris), options))
         # Simulate aria2 writing into the agent-visible staging path when
         # options.dir was already mapped by the caller.
-        directory = Path(str((options or {}).get("dir") or ""))
-        out = str((options or {}).get("out") or "probe.bin")
+        directory = Path(str(options.get("dir") or ""))
+        out = str(options.get("out") or "probe.bin")
+        item = {
+            "gid": gid,
+            "dir": str(directory),
+            "status": "active",
+            "totalLength": "100",
+            "completedLength": "10",
+            "downloadSpeed": "1",
+            "errorCode": "0",
+            "errorMessage": "",
+        }
         # When tests pass aria2-mapped dirs (/nas/...), skip creating files.
         if str(directory).startswith("/nas/"):
-            return "probe-gid"
+            self.active.append(item)
+            return gid
         directory.mkdir(parents=True, exist_ok=True)
         (directory / out).write_bytes(b"probe")
-        return "probe-gid"
+        self.active.append(item)
+        return gid
 
 
 class FakeQas:
     def __init__(self, config=None):
-        self.config = config or {"cookie": "configured"}
+        # Match real QAS `/data` shape: cookie is a one-item list.
+        self.config = config if config is not None else {"cookie": ["configured"]}
 
     def get_config(self):
         return self.config
@@ -105,6 +124,16 @@ class ResourceAgentTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.temp_dir.cleanup()
+
+    def test_qas_cookie_list_is_normalized(self):
+        from resource_agent import _qas_cookie
+
+        self.assertEqual(_qas_cookie({"cookie": ["abc"]}), "abc")
+        self.assertEqual(_qas_cookie({"cookie": [{"cookie": "xyz"}]}), "xyz")
+        self.assertEqual(_qas_cookie({"cookie": "plain"}), "plain")
+        self.assertEqual(_qas_cookie({"cookie": []}), "")
+        # str(list) must never be used as the Cookie header.
+        self.assertNotEqual(_qas_cookie({"cookie": ["abc"]}), str(["abc"]))
 
     def test_list_correlates_aria_task_and_calculates_progress(self):
         self.aria.active = [
@@ -261,6 +290,178 @@ class ResourceAgentTests(unittest.TestCase):
         self.assertEqual(refreshed["status"], "ready")
         self.assertEqual(refreshed["aria2_gids"], ["gid-old"])
 
+    def test_auto_recovers_error_16_with_cookie_headers(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-test"
+        staging.mkdir(parents=True)
+        task = self.store.get_task("rd-test")
+        task["status"] = "error"
+        task["aria2_gids"] = ["bad"]
+        task["cloud_path"] = "/OpenClaw/Movie/rd-test"
+        task["staging_path"] = str(staging)
+        task["aria2_dir"] = str(staging)
+        task["recover_attempts"] = 0
+        self.store.upsert_task(task)
+        self.aria.stopped = [
+            {
+                "gid": "bad",
+                "status": "error",
+                "totalLength": "100",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "dir": str(staging),
+                "files": [],
+                "errorCode": "16",
+                "errorMessage": "Download aborted.",
+            }
+        ]
+
+        instances = []
+
+        class FakeQuark:
+            def __init__(self, cookie):
+                self.cookie = cookie
+                self.paths = []
+                instances.append(self)
+
+            def list_files(self, path):
+                self.paths.append(path)
+                return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
+
+            def download_entries(self, fids):
+                return [
+                    {
+                        "fid": "f1",
+                        "name": "ep.mkv",
+                        "download_url": "https://cdn.example/ep.mkv",
+                    }
+                ]
+
+        with patch("resource_agent.QuarkClient", FakeQuark):
+            result = self.agent.downloads_list()["tasks"][0]
+
+        self.assertEqual(result["status"], "active")
+        refreshed = self.store.get_task("rd-test")
+        self.assertEqual(refreshed["status"], "active")
+        self.assertEqual(refreshed["recover_attempts"], 1)
+        self.assertEqual(instances[0].paths, ["/OpenClaw/Movie/rd-test"])
+        add_calls = [call for call in self.aria.calls if call[0] == "add_uri"]
+        self.assertEqual(len(add_calls), 1)
+        headers = add_calls[0][2]["header"]
+        self.assertTrue(any(item.startswith("Cookie: configured") for item in headers))
+        self.assertTrue(
+            any(item.startswith("Referer: https://pan.quark.cn/") for item in headers)
+        )
+
+    def test_recover_accepts_list_shaped_qas_cookie(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-list-cookie"
+        staging.mkdir(parents=True)
+        task = self.store.get_task("rd-test")
+        task["status"] = "error"
+        task["aria2_gids"] = ["bad"]
+        task["cloud_path"] = "/OpenClaw/Movie/rd-test"
+        task["staging_path"] = str(staging)
+        task["aria2_dir"] = str(staging)
+        self.store.upsert_task(task)
+        self.agent.qas = FakeQas(config={"cookie": ["real-cookie-value"]})
+
+        seen = []
+
+        class FakeQuark:
+            def __init__(self, cookie):
+                seen.append(cookie)
+                self.cookie = cookie
+
+            def list_files(self, path):
+                return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
+
+            def download_entries(self, fids):
+                return [
+                    {
+                        "fid": "f1",
+                        "name": "ep.mkv",
+                        "download_url": "https://cdn.example/ep.mkv",
+                    }
+                ]
+
+        with patch("resource_agent.QuarkClient", FakeQuark):
+            result = self.agent.recover_quark_download("rd-test")
+
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(seen, ["real-cookie-value"])
+        headers = [call for call in self.aria.calls if call[0] == "add_uri"][0][2][
+            "header"
+        ]
+        self.assertTrue(
+            any(item == "Cookie: real-cookie-value" for item in headers)
+        )
+
+    def test_error_16_skips_auto_recover_when_attempts_exhausted(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-cap"
+        staging.mkdir(parents=True)
+        task = self.store.get_task("rd-test")
+        task["status"] = "error"
+        task["aria2_gids"] = ["bad"]
+        task["cloud_path"] = "/OpenClaw/Movie/rd-test"
+        task["staging_path"] = str(staging)
+        task["aria2_dir"] = str(staging)
+        task["recover_attempts"] = 2
+        self.store.upsert_task(task)
+        self.aria.stopped = [
+            {
+                "gid": "bad",
+                "status": "error",
+                "totalLength": "100",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "dir": str(staging),
+                "files": [],
+                "errorCode": "16",
+                "errorMessage": "Download aborted.",
+            }
+        ]
+
+        with patch("resource_agent.QuarkClient") as quark_cls:
+            result = self.agent.downloads_list()["tasks"][0]
+
+        quark_cls.assert_not_called()
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(any("aria2_error_16" in note for note in result["notes"]))
+        self.assertTrue(any("exhausted" in note for note in result["notes"]))
+
+    def test_recover_command_repush_with_cookie(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-manual"
+        staging.mkdir(parents=True)
+        task = self.store.get_task("rd-test")
+        task["status"] = "error"
+        task["aria2_gids"] = ["bad"]
+        task["cloud_path"] = "/OpenClaw/Movie/rd-test"
+        task["staging_path"] = str(staging)
+        task["aria2_dir"] = str(staging)
+        self.store.upsert_task(task)
+
+        class FakeQuark:
+            def __init__(self, cookie):
+                pass
+
+            def list_files(self, path):
+                return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
+
+            def download_entries(self, fids):
+                return [
+                    {
+                        "fid": "f1",
+                        "name": "ep.mkv",
+                        "download_url": "https://cdn.example/ep.mkv",
+                    }
+                ]
+
+        with patch("resource_agent.QuarkClient", FakeQuark):
+            result = self.agent.recover_quark_download("rd-test")
+
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(result["recoveredFiles"], 1)
+        self.assertEqual(self.store.get_task("rd-test")["recover_attempts"], 1)
+
     def test_check_ready_reports_ready(self):
         roots = [
             Path(self.temp_dir.name) / "volume2",
@@ -343,7 +544,7 @@ class ResourceAgentTests(unittest.TestCase):
     def test_check_ready_reports_missing_cookie(self):
         agent = ResourceAgent(
             store=self.store,
-            qas=FakeQas(config={"cookie": ""}),
+            qas=FakeQas(config={"cookie": []}),
             aria=self.aria,
         )
 

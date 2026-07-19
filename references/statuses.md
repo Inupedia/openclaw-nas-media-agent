@@ -39,6 +39,7 @@
 | `staging_only` | 文件在 `.incoming`，需 validate + organize |
 | `staging_missing` | aria2 目标目录未创建 |
 | `aria2_error_18` | Download aborted，常见于暂存目录不可写 |
+| `aria2_error_16` | 已转存到夸克但 aria2 0 字节中止（常见缺 Cookie）；`downloads list/show` 会自动带 Cookie 重推（最多 2 次），勿反复 plan/execute；耗尽后用 `downloads recover TASK_ID` |
 | `aria2_partial_failed` | 混合 GID 结果；不要当成完成 |
 
 ## 对用户表述
