@@ -16,6 +16,30 @@ def downloads_root(routing: dict) -> Path:
     return Path(str(downloads_section(routing)["root"]))
 
 
+def agent_downloads_root(routing: dict) -> Path:
+    section = downloads_section(routing)
+    return Path(str(section.get("agent_root") or section.get("host_root") or section["root"]))
+
+
+def aria2_downloads_root(routing: dict) -> Path:
+    section = downloads_section(routing)
+    return Path(str(section.get("aria2_root") or "/nas/downloads"))
+
+
+def agent_path_to_aria2(path: Path | str, routing: dict) -> str:
+    """Map an OpenClaw/agent downloads path to the aria2 container path."""
+    agent_root = agent_downloads_root(routing).resolve(strict=False)
+    aria2_root = aria2_downloads_root(routing)
+    resolved = Path(path).expanduser().resolve(strict=False)
+    try:
+        relative = resolved.relative_to(agent_root)
+    except ValueError as error:
+        raise ValueError(
+            f"path is outside agent downloads root: {resolved}"
+        ) from error
+    return (aria2_root / relative).as_posix()
+
+
 def staging_root(routing: dict) -> Path:
     section = downloads_section(routing)
     return Path(str(section.get("staging_root") or (downloads_root(routing) / ".incoming")))

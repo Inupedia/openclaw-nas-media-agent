@@ -56,6 +56,19 @@ class FakeAria:
         self.calls.append(("remove_result", gid))
         return gid
 
+    def add_uri(self, uris, *, options=None):
+        self.calls.append(("add_uri", list(uris), dict(options or {})))
+        # Simulate aria2 writing into the agent-visible staging path when
+        # options.dir was already mapped by the caller.
+        directory = Path(str((options or {}).get("dir") or ""))
+        out = str((options or {}).get("out") or "probe.bin")
+        # When tests pass aria2-mapped dirs (/nas/...), skip creating files.
+        if str(directory).startswith("/nas/"):
+            return "probe-gid"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / out).write_bytes(b"probe")
+        return "probe-gid"
+
 
 class FakeQas:
     def __init__(self, config=None):
@@ -224,6 +237,30 @@ class ResourceAgentTests(unittest.TestCase):
             any("staging_missing" in note for note in result["notes"])
         )
 
+    def test_synchronize_does_not_overwrite_terminal_states(self):
+        task = self.store.get_task("rd-test")
+        task["status"] = "ready"
+        task["aria2_gids"] = ["gid-old"]
+        task["aria2_dir"] = "/nas/downloads/.incoming/rd-test"
+        self.store.upsert_task(task)
+        self.aria.stopped = [
+            {
+                "gid": "gid-new",
+                "dir": "/nas/downloads/.incoming/rd-test",
+                "status": "complete",
+                "totalLength": "100",
+                "completedLength": "100",
+                "downloadSpeed": "0",
+            }
+        ]
+
+        listed = self.agent.downloads_list()["tasks"][0]
+        refreshed = self.store.get_task("rd-test")
+
+        self.assertEqual(listed["status"], "ready")
+        self.assertEqual(refreshed["status"], "ready")
+        self.assertEqual(refreshed["aria2_gids"], ["gid-old"])
+
     def test_check_ready_reports_ready(self):
         roots = [
             Path(self.temp_dir.name) / "volume2",
@@ -231,11 +268,77 @@ class ResourceAgentTests(unittest.TestCase):
         ]
         for root in roots:
             root.mkdir()
-
-        result = self.agent.check_ready(roots)
+        # Skip network probe in unit tests.
+        with patch.dict(os.environ, {"ARIA2_PROBE_URL": "skip"}):
+            result = self.agent.check_ready(roots)
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["nextAction"], "ready")
+
+    def test_aria2_probe_maps_agent_path_to_nas(self):
+        downloads = Path(self.temp_dir.name) / "volume2" / "downloads"
+        staging = downloads / ".incoming"
+        staging.mkdir(parents=True)
+        routing = {
+            "downloads": {
+                "root": str(downloads),
+                "agent_root": str(downloads),
+                "aria2_root": "/nas/downloads",
+                "staging_root": str(staging),
+            },
+            "paths": {
+                "protected_roots": [
+                    str(Path(self.temp_dir.name) / "volume2" / "影视"),
+                    str(Path(self.temp_dir.name) / "volume3" / "临时影视"),
+                ],
+                "organizing_root": str(
+                    Path(self.temp_dir.name) / "volume3" / ".openclaw-organizing"
+                ),
+            },
+            "movie": {
+                "final_root": str(
+                    Path(self.temp_dir.name) / "volume3" / "临时影视" / "Movie"
+                ),
+            },
+        }
+        for path in (
+            Path(routing["paths"]["protected_roots"][0]),
+            Path(routing["paths"]["protected_roots"][1]),
+            Path(routing["movie"]["final_root"]),
+            Path(routing["paths"]["organizing_root"]),
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+
+        class WritingAria(FakeAria):
+            def add_uri(self, uris, *, options=None):
+                options = dict(options or {})
+                self.calls.append(("add_uri", list(uris), options))
+                # Caller must pass aria2-mapped dir; map back for the test FS.
+                aria_dir = Path(options["dir"])
+                relative = aria_dir.as_posix().removeprefix("/nas/downloads/")
+                agent_dir = downloads / relative
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                (agent_dir / options["out"]).write_bytes(b"ok")
+                return "probe-gid"
+
+        aria = WritingAria()
+        agent = ResourceAgent(
+            store=self.store,
+            qas=FakeQas(),
+            aria=aria,
+            routing=routing,
+        )
+        with patch.dict(
+            os.environ,
+            {"ARIA2_PROBE_URL": "https://example.com/favicon.ico"},
+        ):
+            result = agent.check_ready([staging])
+
+        self.assertTrue(result["ok"], result)
+        add_calls = [call for call in aria.calls if call[0] == "add_uri"]
+        self.assertEqual(len(add_calls), 1)
+        self.assertTrue(add_calls[0][2]["dir"].startswith("/nas/downloads/"))
+        self.assertFalse(add_calls[0][1][0].startswith("data:"))
 
     def test_check_ready_reports_missing_cookie(self):
         agent = ResourceAgent(

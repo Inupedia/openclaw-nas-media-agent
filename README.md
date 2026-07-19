@@ -183,6 +183,8 @@ services:
       - /volume2/downloads:/volume2/downloads
       - /volume2/影视:/volume2/影视
       - /volume3/临时影视:/volume3/临时影视
+      # Cross-disk movie organize staging; must share the volume3 filesystem
+      - /volume3/.openclaw-organizing:/volume3/.openclaw-organizing
 ```
 
 aria2 至少需要：
@@ -194,15 +196,23 @@ services:
       - /volume2/downloads:/nas/downloads
 ```
 
+`routing.json` 的 downloads 路径映射：
+
+| 角色 | 典型路径 | 说明 |
+| --- | --- | --- |
+| `host_root` / `agent_root` | `/volume2/downloads` | OpenClaw 容器内看到的下载根 |
+| `aria2_root` | `/nas/downloads` | aria2 容器内同一挂载点 |
+
+正式库（`/volume2/影视`、`/volume3/临时影视`）必须预先挂载存在；程序不会自动创建这些目录，避免挂载失效时落到容器本地假目录。
+
 路径不是这些默认值时，需要同时修改：
 
 - `config/routing.json`
-- `scripts/resource_agent.py` 中的正式库保护根目录
-- OpenClaw 的 Docker volumes
+- OpenClaw 的 Docker volumes（含 organizing root）
 - aria2 的 `/nas/downloads` 挂载
 - README 或本地运维记录中的路径说明
 
-不要只改 `routing.json` 而忘记保护根目录。
+不要只改 `routing.json` 而忘记保护根目录与 organizing 挂载。
 
 ## 默认存储流程
 

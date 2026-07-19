@@ -20,6 +20,7 @@ class PlanningError(RuntimeError):
 QUARK_LINK = re.compile(r"https://pan\.quark\.cn/s/[A-Za-z0-9_-]+")
 INTENT_PREFIX = re.compile(r"^\s*(?:请|帮我|给我)?\s*(?:下载|追更|搜索|查找)\s*")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts")
+SIDECAR_EXTENSIONS = (".ass", ".ssa", ".srt", ".vtt", ".sub")
 
 
 def _episode_dict(key) -> dict:
@@ -37,6 +38,15 @@ def _episode_tuple(item: dict) -> tuple[int, int, str | None]:
     )
 
 
+def _file_kind(name: str) -> str:
+    extension = Path(str(name)).suffix.casefold()
+    if extension in VIDEO_EXTENSIONS:
+        return "video"
+    if extension in SIDECAR_EXTENSIONS:
+        return "sidecar"
+    return "other"
+
+
 def build_expected_manifest(
     *,
     transfer_jobs: list[dict],
@@ -45,25 +55,47 @@ def build_expected_manifest(
     new_episodes: list[dict] | None = None,
     default_season: int | None = None,
 ) -> dict:
-    expected_names = []
+    videos: list[dict] = []
+    sidecars: list[dict] = []
     seen: set[str] = set()
-    for job in transfer_jobs:
-        for name in job.get("fileNames") or []:
-            key = str(name)
-            if key and key not in seen:
-                seen.add(key)
-                expected_names.append(key)
-    if not expected_names:
-        expected_names = list(selected_files)
+
+    def add_name(name: str, *, fid: str, job_index: int) -> None:
+        key = str(name or "").strip()
+        if not key:
+            return
+        identity = f"{fid}/{key}"
+        if identity in seen:
+            return
+        seen.add(identity)
+        entry = {
+            "id": identity,
+            "name": key,
+            "fid": fid,
+            "jobIndex": job_index,
+        }
+        kind = _file_kind(key)
+        if kind == "video":
+            videos.append(entry)
+        elif kind == "sidecar":
+            sidecars.append(entry)
+
+    if transfer_jobs:
+        for job_index, job in enumerate(transfer_jobs):
+            fid = str(job.get("fid") or f"job-{job_index}")
+            for name in job.get("fileNames") or []:
+                add_name(name, fid=fid, job_index=job_index)
+    else:
+        for name in selected_files:
+            add_name(name, fid="__root__", job_index=0)
 
     episode_keys: list[dict] = []
     if new_episodes:
         episode_keys = list(new_episodes)
     else:
         found = []
-        for name in expected_names:
+        for item in videos:
             key = extract_episode_key(
-                name,
+                item["name"],
                 title_key,
                 default_season=default_season,
             )
@@ -71,18 +103,25 @@ def build_expected_manifest(
                 found.append(_episode_dict(key))
         episode_keys = found
 
+    all_names = [item["name"] for item in (*videos, *sidecars)]
     return {
         "transferJobCount": len(transfer_jobs),
         "transferJobs": [
             {
+                "fid": str(job.get("fid") or f"job-{index}"),
                 "fileNames": list(job.get("fileNames") or []),
                 "fileCount": int(job.get("fileCount") or 0),
             }
-            for job in transfer_jobs
+            for index, job in enumerate(transfer_jobs)
         ],
-        "expectedFileNames": expected_names,
-        "expectedFileCount": len(expected_names),
+        "expectedVideoFiles": videos,
+        "expectedSidecarFiles": sidecars,
+        # Backward-compatible aliases used by older callers/tests.
+        "expectedFileNames": [item["name"] for item in videos],
+        "expectedFileCount": len(videos),
+        "expectedAllFileCount": len(videos) + len(sidecars),
         "expectedEpisodeKeys": episode_keys,
+        "expectedNames": all_names,
     }
 
 
@@ -150,6 +189,7 @@ def build_transfer_jobs(
         )
         jobs.append(
             {
+                "fid": fid,
                 "shareurl": shareurl,
                 "pattern": _pattern_for_names(names),
                 "fileNames": names,
@@ -160,6 +200,7 @@ def build_transfer_jobs(
         return jobs
     return [
         {
+            "fid": "__root__",
             "shareurl": str(base_shareurl or ""),
             "pattern": r"(?i)^(?!.*\.(?:zip|rar|7z)$).*$",
             "fileNames": [],
@@ -489,6 +530,7 @@ class DownloadPlanner:
                     continue
                 filtered_jobs.append(
                     {
+                        "fid": str(job.get("fid") or "__root__"),
                         "shareurl": job["shareurl"],
                         "pattern": _pattern_for_names(names),
                         "fileNames": names,
@@ -498,6 +540,7 @@ class DownloadPlanner:
             if not filtered_jobs:
                 filtered_jobs = [
                     {
+                        "fid": "__root__",
                         "shareurl": str(candidate.get("shareurl") or ""),
                         "pattern": _pattern_for_names(selected_files),
                         "fileNames": list(selected_files),

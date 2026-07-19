@@ -240,6 +240,103 @@ class OrganizerTests(unittest.TestCase):
         self.assertFalse(source.exists())
         refreshed = self.store.get_task(task["task_id"])
         self.assertEqual(refreshed["status"], "ready")
+        self.assertEqual(refreshed["aria2_gids"], [])
+
+    def test_validate_accepts_video_plus_sidecar_manifest(self):
+        task = self.make_task()
+        task["expected_manifest"] = {
+            "transferJobCount": 1,
+            "expectedVideoFiles": [
+                {
+                    "id": "fid-a/E01.mkv",
+                    "name": "E01.mkv",
+                    "fid": "fid-a",
+                    "jobIndex": 0,
+                }
+            ],
+            "expectedSidecarFiles": [
+                {
+                    "id": "fid-a/E01.ass",
+                    "name": "E01.ass",
+                    "fid": "fid-a",
+                    "jobIndex": 0,
+                }
+            ],
+            "expectedFileNames": ["E01.mkv"],
+            "expectedFileCount": 1,
+            "expectedAllFileCount": 2,
+            "expectedEpisodeKeys": [],
+        }
+        self.store.upsert_task(task)
+        source = Path(task["staging_path"])
+        source.mkdir()
+        (source / "E01.mkv").write_bytes(b"video")
+        (source / "E01.ass").write_text("[Script Info]")
+        validator = DownloadValidator(
+            self.store,
+            self.guard,
+            self.downloads,
+            ffprobe_runner=None,
+        )
+
+        report = validator.validate(task["task_id"])
+
+        self.assertTrue(report.ok, report.problems)
+        self.assertEqual(self.store.get_task(task["task_id"])["status"], "ready")
+
+    def test_validate_requires_duplicate_basename_coverage(self):
+        task = self.make_task()
+        task["expected_manifest"] = {
+            "transferJobCount": 2,
+            "expectedVideoFiles": [
+                {"id": "s1/01.mkv", "name": "01.mkv", "fid": "s1", "jobIndex": 0},
+                {"id": "s2/01.mkv", "name": "01.mkv", "fid": "s2", "jobIndex": 1},
+            ],
+            "expectedSidecarFiles": [],
+            "expectedFileCount": 2,
+            "expectedEpisodeKeys": [],
+        }
+        self.store.upsert_task(task)
+        source = Path(task["staging_path"])
+        source.mkdir()
+        (source / "01.mkv").write_bytes(b"one")
+        validator = DownloadValidator(
+            self.store,
+            self.guard,
+            self.downloads,
+            ffprobe_runner=None,
+        )
+
+        report = validator.validate(task["task_id"])
+
+        self.assertFalse(report.ok)
+        self.assertIn("expected_files_missing", report.problems)
+
+    def test_validate_recovers_quarantined_to_ready(self):
+        task = self.make_task()
+        quarantine = self.downloads / ".quarantine" / task["task_id"]
+        quarantine.mkdir(parents=True)
+        (quarantine / "episode.mkv").write_bytes(b"video")
+        task["status"] = "quarantined"
+        task["staging_path"] = str(quarantine)
+        task["aria2_gids"] = ["stale"]
+        self.store.upsert_task(task)
+        validator = DownloadValidator(
+            self.store,
+            self.guard,
+            self.downloads,
+            ffprobe_runner=None,
+        )
+
+        report = validator.validate(task["task_id"])
+
+        self.assertTrue(report.ok)
+        ready = self.downloads / ".ready" / task["task_id"]
+        self.assertTrue(ready.exists())
+        self.assertFalse(quarantine.exists())
+        refreshed = self.store.get_task(task["task_id"])
+        self.assertEqual(refreshed["status"], "ready")
+        self.assertEqual(refreshed["aria2_gids"], [])
 
 
 if __name__ == "__main__":

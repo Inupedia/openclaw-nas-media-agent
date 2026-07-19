@@ -43,6 +43,9 @@
   },
   "downloads": {
     "root": "/volume2/downloads",
+    "host_root": "/volume2/downloads",
+    "agent_root": "/volume2/downloads",
+    "aria2_root": "/nas/downloads",
     "staging_root": "/volume2/downloads/.incoming",
     "ready_root": "/volume2/downloads/.ready",
     "quarantine_root": "/volume2/downloads/.quarantine"

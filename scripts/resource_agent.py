@@ -94,11 +94,29 @@ def _optional_jiaofu(base_dir: Path):
         return None
 
 
+SYNCABLE_STATES = {
+    "starting",
+    "submitted",
+    "active",
+    "waiting",
+    "paused",
+    "partial_failed",
+    "error",
+}
+TERMINAL_DOWNLOAD_STATES = {
+    "ready",
+    "quarantined",
+    "organized",
+    "cancelled",
+}
+
+
 class ResourceAgent:
-    def __init__(self, *, store: StateStore, qas, aria):
+    def __init__(self, *, store: StateStore, qas, aria, routing: dict | None = None):
         self.store = store
         self.qas = qas
         self.aria = aria
+        self.routing = routing or {}
 
     def _aria_items(self) -> list[dict]:
         return [
@@ -114,6 +132,8 @@ class ResourceAgent:
             by_dir.setdefault(directory, []).append(item)
 
         for task in self.store.list_tasks():
+            if task["status"] not in SYNCABLE_STATES:
+                continue
             items = by_dir.get(task["aria2_dir"].rstrip("/"), [])
             if not items:
                 continue
@@ -295,6 +315,9 @@ class ResourceAgent:
                     "nextAction": "fix_path_permissions",
                     "error": f"staging path is not writable: {root}",
                 }
+        path_check = self._check_library_roots()
+        if not path_check.get("ok"):
+            return path_check
         probe = self._probe_aria2_write(staging_roots[0] if staging_roots else None)
         if not probe.get("ok"):
             return probe
@@ -304,15 +327,82 @@ class ResourceAgent:
             "data": {
                 "aria2Version": aria_version.get("version"),
                 "aria2WriteProbe": probe.get("data"),
+                "pathChecks": path_check.get("data"),
+            },
+        }
+
+    def _check_library_roots(self) -> dict:
+        if not self.routing:
+            return {"ok": True, "data": {"skipped": True}}
+        from routing_paths import (
+            final_roots,
+            organizing_root,
+            protected_roots,
+        )
+
+        missing = []
+        for root in (*protected_roots(self.routing), *final_roots(self.routing)):
+            if not root.is_dir():
+                missing.append(str(root))
+        if missing:
+            return {
+                "ok": False,
+                "nextAction": "mount_media_libraries",
+                "error": "required media library roots missing: " + ", ".join(missing),
+            }
+        org = organizing_root(self.routing)
+        try:
+            org.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            return {
+                "ok": False,
+                "nextAction": "mount_organizing_root",
+                "error": f"organizing root unavailable: {org}: {error}",
+            }
+        # Movie finals live on volume3; organizing must share that device.
+        movie_final = None
+        for media_type in ("movie",):
+            route = self.routing.get(media_type)
+            if isinstance(route, dict) and route.get("final_root"):
+                movie_final = Path(str(route["final_root"]))
+                break
+        same_device = None
+        if movie_final is not None and movie_final.parent.is_dir():
+            try:
+                same_device = org.stat().st_dev == movie_final.parent.stat().st_dev
+            except OSError:
+                same_device = False
+            if same_device is False:
+                return {
+                    "ok": False,
+                    "nextAction": "mount_organizing_root",
+                    "error": (
+                        f"organizing root {org} is not on the same filesystem as "
+                        f"{movie_final.parent}; cross-disk os.replace will fail"
+                    ),
+                }
+        return {
+            "ok": True,
+            "data": {
+                "organizingRoot": str(org),
+                "organizingSameDeviceAsMovie": same_device,
             },
         }
 
     def _probe_aria2_write(self, staging_root: Path | None) -> dict:
-        """Create a staging dir OpenClaw can write, ask aria2 to drop a tiny file."""
+        """Verify aria2 can write into the shared downloads mount."""
         if staging_root is None or not hasattr(self.aria, "add_uri"):
             return {"ok": True, "data": {"skipped": True}}
+        probe_url = os.environ.get(
+            "ARIA2_PROBE_URL",
+            "https://example.com/",
+        ).strip()
+        if probe_url in {"", "skip", "0", "false", "False"}:
+            return {"ok": True, "data": {"skipped": True, "reason": "ARIA2_PROBE_URL"}}
+        from routing_paths import agent_path_to_aria2
+
         probe_dir = staging_root / f".check-ready-{os.getpid()}"
-        probe_name = "openclaw-aria2-probe.txt"
+        probe_name = "openclaw-aria2-probe.bin"
         probe_file = probe_dir / probe_name
         try:
             probe_dir.mkdir(parents=True, exist_ok=True)
@@ -320,19 +410,26 @@ class ResourceAgent:
                 os.chmod(probe_dir, 0o775)
             except OSError:
                 pass
-            # data URI avoids network; aria2 writes the decoded bytes into dir.
+            try:
+                aria2_dir = agent_path_to_aria2(probe_dir, self.routing)
+            except Exception as error:
+                return {
+                    "ok": False,
+                    "nextAction": "fix_aria2_path_mapping",
+                    "error": f"aria2 path mapping failed: {error}",
+                }
             gid = self.aria.add_uri(
-                ["data:text/plain,openclaw-aria2-probe"],
+                [probe_url],
                 options={
-                    "dir": str(probe_dir),
+                    "dir": aria2_dir,
                     "out": probe_name,
                     "follow-torrent": "false",
+                    "max-connection-per-server": "1",
                 },
             )
-            # Brief poll for file appearance.
             import time as _time
 
-            deadline = _time.time() + 8
+            deadline = _time.time() + 12
             while _time.time() < deadline:
                 if probe_file.is_file() and probe_file.stat().st_size > 0:
                     break
@@ -340,6 +437,10 @@ class ResourceAgent:
             visible = probe_file.is_file() and probe_file.stat().st_size > 0
             try:
                 if gid:
+                    try:
+                        self.aria.remove(str(gid))
+                    except Exception:
+                        pass
                     self.aria.remove_result(str(gid))
             except Exception:
                 pass
@@ -348,13 +449,17 @@ class ResourceAgent:
                     "ok": False,
                     "nextAction": "fix_aria2_path_mapping",
                     "error": (
-                        "aria2 write probe failed: OpenClaw staging is writable "
-                        "but aria2 did not create the probe file (path map / uid)"
+                        "aria2 write probe failed: agent staging is writable but "
+                        f"aria2 did not create {probe_name} under mapped dir {aria2_dir}"
                     ),
                 }
             return {
                 "ok": True,
-                "data": {"probeFile": probe_name, "gid": str(gid)},
+                "data": {
+                    "probeFile": probe_name,
+                    "gid": str(gid),
+                    "aria2Dir": aria2_dir,
+                },
             }
         except Exception as error:
             return {
@@ -631,8 +736,14 @@ def _default_organizer_factory(routing, store):
     downloads = routing_downloads_root(routing)
     org_root = routing_organizing_root(routing)
     allowed, protected = path_guard_roots(routing)
-    # Ensure roots exist for PathGuard strict resolve in production.
-    for root in (*allowed, org_root, downloads / ".incoming", downloads / ".ready", downloads / ".quarantine"):
+    # Only auto-create staging / organizing dirs. Formal libraries and
+    # protected roots must already exist as bind mounts (never shadow them).
+    for root in (
+        downloads / ".incoming",
+        downloads / ".ready",
+        downloads / ".quarantine",
+        org_root,
+    ):
         try:
             root.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -673,7 +784,7 @@ def main(
         except TypeError:
             loaded = runtime_loader()
         routing, store, qas, aria, planner, pansou, jiaofu = loaded
-        agent = ResourceAgent(store=store, qas=qas, aria=aria)
+        agent = ResourceAgent(store=store, qas=qas, aria=aria, routing=routing)
         service = None
         if args.command in {
             "library",

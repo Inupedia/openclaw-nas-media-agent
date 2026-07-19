@@ -394,7 +394,9 @@ class StateStore:
             "paused",
             "downloaded",
             "verified",
+            "complete",
             "ready",
+            "quarantined",
             "organizing",
         }
         for task in self.list_tasks():

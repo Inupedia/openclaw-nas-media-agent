@@ -1,5 +1,6 @@
 import os
 import shutil
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -10,12 +11,8 @@ from state_store import PlanError, StateStore
 
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts"}
-ALLOWED_EXTENSIONS = VIDEO_EXTENSIONS | {
-    ".ass",
-    ".ssa",
-    ".srt",
-    ".vtt",
-    ".sub",
+SIDECAR_EXTENSIONS = {".ass", ".ssa", ".srt", ".vtt", ".sub"}
+ALLOWED_EXTENSIONS = VIDEO_EXTENSIONS | SIDECAR_EXTENSIONS | {
     ".nfo",
     ".jpg",
     ".jpeg",
@@ -67,26 +64,63 @@ class DownloadValidator:
         task: dict,
         source: Path,
         videos: list[Path],
+        sidecars: list[Path],
         problems: list[str],
     ) -> None:
         expected = task.get("expected_manifest") or {}
         if not isinstance(expected, dict) or not expected:
             return
-        expected_names = [
-            str(name) for name in (expected.get("expectedFileNames") or []) if name
-        ]
-        if not expected_names:
-            return
-        present = {path.name for path in videos}
-        missing = [name for name in expected_names if name not in present]
-        if missing:
+
+        video_entries = list(expected.get("expectedVideoFiles") or [])
+        sidecar_entries = list(expected.get("expectedSidecarFiles") or [])
+        # Legacy manifests only listed basenames (often mixing videos+subs).
+        if not video_entries and not sidecar_entries:
+            legacy_names = [
+                str(name)
+                for name in (expected.get("expectedFileNames") or [])
+                if name
+            ]
+            for name in legacy_names:
+                extension = Path(name).suffix.casefold()
+                entry = {"name": name, "id": f"legacy/{name}"}
+                if extension in SIDECAR_EXTENSIONS:
+                    sidecar_entries.append(entry)
+                else:
+                    video_entries.append(entry)
+
+        present_videos = Counter(path.name for path in videos)
+        present_sidecars = Counter(path.name for path in sidecars)
+        wanted_videos = Counter(
+            str(item.get("name") or "") for item in video_entries if item.get("name")
+        )
+        wanted_sidecars = Counter(
+            str(item.get("name") or "")
+            for item in sidecar_entries
+            if item.get("name")
+        )
+
+        if wanted_videos and any(
+            present_videos[name] < count for name, count in wanted_videos.items()
+        ):
             problems.append("expected_files_missing")
-        expected_count = int(expected.get("expectedFileCount") or len(expected_names))
-        if len(videos) < expected_count:
+        if wanted_sidecars and any(
+            present_sidecars[name] < count for name, count in wanted_sidecars.items()
+        ):
+            problems.append("expected_sidecar_files_missing")
+
+        expected_video_count = int(
+            expected.get("expectedFileCount")
+            or (len(video_entries) if video_entries else 0)
+        )
+        if expected_video_count and len(videos) < expected_video_count:
             problems.append("expected_file_count_mismatch")
+        expected_all = int(expected.get("expectedAllFileCount") or 0)
+        if expected_all and (len(videos) + len(sidecars)) < expected_all:
+            problems.append("expected_all_file_count_mismatch")
         expected_jobs = int(expected.get("transferJobCount") or 0)
-        if expected_jobs > 1 and len(videos) < expected_count:
+        if expected_jobs > 1 and expected_video_count and len(videos) < expected_video_count:
             problems.append("transfer_jobs_incomplete")
+
         episode_keys = list(expected.get("expectedEpisodeKeys") or [])
         if episode_keys:
             title_key = str(task.get("title_key") or normalize_title_key(task["title"]))
@@ -112,6 +146,10 @@ class DownloadValidator:
             if not wanted.issubset(found):
                 problems.append("expected_episodes_missing")
 
+    def _clear_download_sync(self, task: dict) -> None:
+        """Stop aria2 status sync after validate/organize terminal states."""
+        task["aria2_gids"] = []
+
     def _relocate_source(
         self,
         task: dict,
@@ -121,9 +159,21 @@ class DownloadValidator:
     ) -> str | None:
         if not self.relocate:
             return None
-        if not source.is_relative_to(self.incoming_root):
-            return None
         target_root = self.ready_root if ok else self.quarantine_root
+        desired_status = "ready" if ok else "quarantined"
+        # Already in the correct lane: only refresh status / clear GIDs.
+        if source.is_relative_to(target_root):
+            task["status"] = desired_status
+            self._clear_download_sync(task)
+            self.store.upsert_task(task)
+            return str(source)
+        allowed_sources = (
+            self.incoming_root,
+            self.ready_root,
+            self.quarantine_root,
+        )
+        if not any(source.is_relative_to(root) for root in allowed_sources):
+            return None
         target = self.guard.resolve_target(str(target_root / task["task_id"]))
         self.guard.assert_mutable(target)
         if target.exists():
@@ -133,7 +183,8 @@ class DownloadValidator:
         target_root.mkdir(parents=True, exist_ok=True)
         os.replace(source, target)
         task["staging_path"] = str(target)
-        task["status"] = "ready" if ok else "quarantined"
+        task["status"] = desired_status
+        self._clear_download_sync(task)
         self.store.upsert_task(task)
         return str(target)
 
@@ -156,6 +207,7 @@ class DownloadValidator:
 
         manifest = {}
         videos = []
+        sidecars = []
         for path in source.rglob("*"):
             if path.is_symlink():
                 problems.append("symlink_found")
@@ -176,6 +228,8 @@ class DownloadValidator:
                 videos.append(path)
                 if size == 0:
                     problems.append("zero_byte_media")
+            elif extension in SIDECAR_EXTENSIONS:
+                sidecars.append(path)
         if not videos:
             problems.append("no_video_media")
         if self.ffprobe_runner is not None:
@@ -183,14 +237,17 @@ class DownloadValidator:
                 if video.stat().st_size and not self.ffprobe_runner(video):
                     problems.append("unreadable_video")
                     break
-        self._check_expected_manifest(task, source, videos, problems)
+        self._check_expected_manifest(task, source, videos, sidecars, problems)
         unique_problems = tuple(sorted(set(problems)))
         ok = not unique_problems
         relocated = None
-        if task["status"] == "complete" and in_incoming and (
-            "task_not_complete" not in unique_problems
-        ):
-            # Only relocate when aria2 reported complete and path checks ran.
+        status = task["status"]
+        should_relocate = "task_not_complete" not in unique_problems and (
+            (status == "complete" and in_incoming)
+            or (status == "quarantined" and in_quarantine)
+            or (status == "ready" and in_ready and not ok)
+        )
+        if should_relocate:
             try:
                 relocated = self._relocate_source(task, source, ok=ok)
             except OrganizeError:
@@ -394,6 +451,7 @@ class Organizer:
         task["staging_path"] = str(source)
         task["final_path"] = str(final_path)
         task["status"] = "organized"
+        task["aria2_gids"] = []
         self.store.upsert_task(task)
         return {
             "taskId": task["task_id"],

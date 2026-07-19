@@ -157,6 +157,26 @@ class StateStoreTests(unittest.TestCase):
             {(1, 3, None), (1, 4, None)},
         )
 
+    def test_pending_episode_refs_include_complete_tasks(self):
+        self.store.upsert_task(
+            {
+                "task_id": "rd-complete",
+                "title": "Show",
+                "title_key": "show",
+                "media_type": "tv",
+                "aria2_gids": ["abc"],
+                "episode_keys": [{"season": 1, "episode": 5}],
+                "staging_path": "/volume2/downloads/.incoming/rd-complete",
+                "final_path": "/volume2/影视/Drama/Show",
+                "status": "complete",
+            }
+        )
+
+        self.assertEqual(
+            self.store.pending_episode_refs("show"),
+            {(1, 5, None)},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

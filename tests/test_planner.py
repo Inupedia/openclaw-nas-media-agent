@@ -740,6 +740,43 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(manifest["expectedFileNames"], ["Show.S01E01.mkv"])
         self.assertEqual(manifest["expectedFileCount"], 1)
         self.assertEqual(manifest["transferJobCount"], 1)
+        self.assertEqual(
+            [item["name"] for item in manifest["expectedVideoFiles"]],
+            ["Show.S01E01.mkv"],
+        )
+        self.assertEqual(manifest["expectedSidecarFiles"], [])
+
+    def test_expected_manifest_keeps_duplicate_basenames_and_sidecars(self):
+        from planner import build_expected_manifest
+
+        jobs = [
+            {
+                "fid": "s1",
+                "fileNames": ["01.mkv", "01.ass"],
+                "fileCount": 2,
+            },
+            {
+                "fid": "s2",
+                "fileNames": ["01.mkv"],
+                "fileCount": 1,
+            },
+        ]
+        manifest = build_expected_manifest(
+            transfer_jobs=jobs,
+            selected_files=[],
+            title_key="show",
+        )
+        self.assertEqual(len(manifest["expectedVideoFiles"]), 2)
+        self.assertEqual(
+            {item["id"] for item in manifest["expectedVideoFiles"]},
+            {"s1/01.mkv", "s2/01.mkv"},
+        )
+        self.assertEqual(
+            [item["id"] for item in manifest["expectedSidecarFiles"]],
+            ["s1/01.ass"],
+        )
+        self.assertEqual(manifest["expectedFileCount"], 2)
+        self.assertEqual(manifest["expectedAllFileCount"], 3)
 
 
 if __name__ == "__main__":
