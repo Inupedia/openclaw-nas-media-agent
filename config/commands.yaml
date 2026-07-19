@@ -1,0 +1,65 @@
+# Machine-readable command contract (source of truth for docs/tests).
+# Levels: L0 read | L1 local state | L2 remote query | L3 download | L4 library mutate
+
+version: "0.4.0"
+
+commands:
+  library.lookup:
+    effect: L0
+    confirmation: none
+  search:
+    effect: L1
+    confirmation: none
+  preview:
+    effect: L1
+    confirmation: none
+  tree:
+    effect: L1
+    confirmation: none
+  import-url:
+    effect: L1
+    confirmation: none
+  plan.download:
+    effect: L1
+    confirmation: none
+  execute:
+    effect: L3
+    confirmation: required
+  downloads.list:
+    effect: L0
+    confirmation: none
+    side_effects: sync_aria2_status_only
+  downloads.show:
+    effect: L0
+    confirmation: none
+    side_effects: sync_aria2_status_only
+  downloads.pause:
+    effect: L3
+    confirmation: none
+  downloads.resume:
+    effect: L3
+    confirmation: none
+  downloads.cancel:
+    effect: L3
+    confirmation: none
+  downloads.validate:
+    effect: L3
+    confirmation: none
+  downloads.recover.plan:
+    effect: L1
+    confirmation: none
+    requires_env: [QUARK_RECOVERY_ENABLED]
+    allowed_states: [error, partial_failed]
+    allowed_error_codes: ["16"]
+  downloads.recover.execute:
+    effect: L3
+    confirmation: required
+    requires_env: [QUARK_RECOVERY_ENABLED]
+    allowed_states: [error, partial_failed]
+    allowed_error_codes: ["16"]
+  organize.plan:
+    effect: L1
+    confirmation: none
+  organize.execute:
+    effect: L4
+    confirmation: required

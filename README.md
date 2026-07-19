@@ -160,6 +160,10 @@ environment:
   ARIA2_RPC_URL: "http://<aria2-host>:<aria2-port>/jsonrpc"
   ARIA2_RPC_SECRET: "<aria2-rpc-secret>"
   RESOURCE_AGENT_STATE_DB: "/root/.openclaw/workspace/data/resource-download-agent/state.db"
+  # Optional — Quark error-16 recovery (default off; list/show never auto-recover)
+  # QUARK_RECOVERY_ENABLED: "true"
+  # QUARK_RECOVERY_MAX_ATTEMPTS: "2"
+  # QUARK_RECOVERY_COOLDOWN_SECONDS: "300"
   # Optional — UGREEN 影视中心本地库（Docker 内需能访问 NAS 上的 API / Redis）
   # VIDEOMGR_ENABLED: "auto"
   # VIDEOMGR_BASE_URL: "http://<nas-gateway-host>:9999"
@@ -298,8 +302,8 @@ bin/mediactl search "电视剧名" --media-type drama
 
 ```bash
 bin/mediactl preview CANDIDATE_ID
-bin/mediactl plan download CANDIDATE_ID
-bin/mediactl execute PLAN_ID
+bin/mediactl tree CANDIDATE_ID
+bin/mediactl plan download CANDIDATE_ID --node NODE_ID [--media-type anime]
 bin/mediactl execute PLAN_ID --confirmed
 ```
 
@@ -308,14 +312,19 @@ bin/mediactl execute PLAN_ID --confirmed
 ```bash
 bin/mediactl downloads list
 bin/mediactl downloads show TASK_ID
-bin/mediactl downloads recover TASK_ID
 bin/mediactl downloads pause TASK_ID
 bin/mediactl downloads resume TASK_ID
 bin/mediactl downloads cancel TASK_ID
 bin/mediactl downloads validate TASK_ID
 ```
 
-`downloads list/show` 会在 aria2 error 16（夸克已转存但 0 字节中止，通常缺 Cookie）时自动带 Cookie 重推；耗尽后再用 `downloads recover`。
+夸克 Cookie 恢复（需 `QUARK_RECOVERY_ENABLED=true`；`list/show` **不会**自动恢复）：
+
+```bash
+bin/mediactl downloads recover plan TASK_ID
+bin/mediactl downloads recover execute PLAN_ID --confirmed
+```
+
 整理：
 
 ```bash

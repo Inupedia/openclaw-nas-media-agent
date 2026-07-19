@@ -29,3 +29,11 @@
 {baseDir}/bin/mediactl organize plan TASK_ID
 {baseDir}/bin/mediactl organize execute PLAN_ID --confirmed
 ```
+
+## error 16 确认恢复
+
+```text
+{baseDir}/bin/mediactl downloads show TASK_ID
+{baseDir}/bin/mediactl downloads recover plan TASK_ID
+{baseDir}/bin/mediactl downloads recover execute PLAN_ID --confirmed
+```

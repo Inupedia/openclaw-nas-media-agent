@@ -290,16 +290,15 @@ class ResourceAgentTests(unittest.TestCase):
         self.assertEqual(refreshed["status"], "ready")
         self.assertEqual(refreshed["aria2_gids"], ["gid-old"])
 
-    def test_auto_recovers_error_16_with_cookie_headers(self):
-        staging = Path(self.temp_dir.name) / "incoming" / "rd-test"
-        staging.mkdir(parents=True)
+    def _error16_task(self, staging: Path, *, attempts: int = 0):
         task = self.store.get_task("rd-test")
         task["status"] = "error"
         task["aria2_gids"] = ["bad"]
         task["cloud_path"] = "/OpenClaw/Movie/rd-test"
         task["staging_path"] = str(staging)
         task["aria2_dir"] = str(staging)
-        task["recover_attempts"] = 0
+        task["recover_attempts"] = attempts
+        task["recovery"] = {"attempts": attempts, "status": "idle"}
         self.store.upsert_task(task)
         self.aria.stopped = [
             {
@@ -314,153 +313,128 @@ class ResourceAgentTests(unittest.TestCase):
                 "errorMessage": "Download aborted.",
             }
         ]
+        return task
 
-        instances = []
-
-        class FakeQuark:
-            def __init__(self, cookie):
-                self.cookie = cookie
-                self.paths = []
-                instances.append(self)
-
-            def list_files(self, path):
-                self.paths.append(path)
-                return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
-
-            def download_entries(self, fids):
-                return [
-                    {
-                        "fid": "f1",
-                        "name": "ep.mkv",
-                        "download_url": "https://cdn.example/ep.mkv",
-                    }
-                ]
-
-        with patch("resource_agent.QuarkClient", FakeQuark):
-            result = self.agent.downloads_list()["tasks"][0]
-
-        self.assertEqual(result["status"], "active")
-        refreshed = self.store.get_task("rd-test")
-        self.assertEqual(refreshed["status"], "active")
-        self.assertEqual(refreshed["recover_attempts"], 1)
-        self.assertEqual(instances[0].paths, ["/OpenClaw/Movie/rd-test"])
-        add_calls = [call for call in self.aria.calls if call[0] == "add_uri"]
-        self.assertEqual(len(add_calls), 1)
-        headers = add_calls[0][2]["header"]
-        self.assertTrue(any(item.startswith("Cookie: configured") for item in headers))
-        self.assertTrue(
-            any(item.startswith("Referer: https://pan.quark.cn/") for item in headers)
-        )
-
-    def test_recover_accepts_list_shaped_qas_cookie(self):
-        staging = Path(self.temp_dir.name) / "incoming" / "rd-list-cookie"
+    def test_list_does_not_auto_recover_error_16(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-list-ro"
         staging.mkdir(parents=True)
-        task = self.store.get_task("rd-test")
-        task["status"] = "error"
-        task["aria2_gids"] = ["bad"]
-        task["cloud_path"] = "/OpenClaw/Movie/rd-test"
-        task["staging_path"] = str(staging)
-        task["aria2_dir"] = str(staging)
-        self.store.upsert_task(task)
-        self.agent.qas = FakeQas(config={"cookie": ["real-cookie-value"]})
+        self._error16_task(staging)
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}):
+            with patch("resource_agent.QuarkClient") as quark_cls:
+                result = self.agent.downloads_list()["tasks"][0]
+        quark_cls.assert_not_called()
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["nextAction"], "confirm_recover")
+        self.assertTrue(result["recovery"]["eligible"])
+        self.assertEqual(self.store.get_task("rd-test")["recover_attempts"], 0)
+        self.assertEqual(self.aria.calls, [])
 
+    def test_cancel_does_not_recover_before_control(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-cancel"
+        staging.mkdir(parents=True)
+        self._error16_task(staging)
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}):
+            with patch("resource_agent.QuarkClient") as quark_cls:
+                self.agent.downloads_control("rd-test", "cancel")
+        quark_cls.assert_not_called()
+        self.assertEqual(self.store.get_task("rd-test")["status"], "cancelled")
+
+    def test_recover_execute_requires_confirmed_and_enabled(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-confirm"
+        staging.mkdir(parents=True)
+        self._error16_task(staging)
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}):
+            with patch("resource_agent.QuarkClient") as quark_cls:
+                quark_cls.return_value.list_files.return_value = [
+                    {"fid": "f1", "name": "ep.mkv", "size": 10}
+                ]
+                planned = self.agent.plan_quark_recovery("rd-test")
+                with self.assertRaisesRegex(AgentError, "--confirmed"):
+                    self.agent.execute_quark_recovery(planned["planId"], confirmed=False)
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "false"}):
+            with self.assertRaisesRegex(AgentError, "disabled"):
+                self.agent.execute_quark_recovery(planned["planId"], confirmed=True)
+
+    def test_recover_plan_execute_with_cookie_and_attempt_accounting(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-ok"
+        staging.mkdir(parents=True)
+        self._error16_task(staging)
+        self.agent.qas = FakeQas(config={"cookie": ["real-cookie-value"]})
         seen = []
 
         class FakeQuark:
             def __init__(self, cookie):
                 seen.append(cookie)
+
+            def list_files(self, path):
+                return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
+
+            def download_entries(self, fids):
+                return [
+                    {
+                        "fid": "f1",
+                        "name": "ep.mkv",
+                        "download_url": "https://cdn.example/ep.mkv",
+                    }
+                ]
+
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}):
+            with patch("resource_agent.QuarkClient", FakeQuark):
+                planned = self.agent.plan_quark_recovery("rd-test")
+                self.assertEqual(planned["nextAction"], "confirm_recover")
+                self.assertEqual(planned["fileCount"], 1)
+                result = self.agent.execute_quark_recovery(
+                    planned["planId"], confirmed=True
+                )
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(seen[0], "real-cookie-value")
+        refreshed = self.store.get_task("rd-test")
+        self.assertEqual(refreshed["recover_attempts"], 1)
+        self.assertEqual(refreshed["recovery"]["status"], "submitted")
+        headers = [call for call in self.aria.calls if call[0] == "add_uri"][0][2][
+            "header"
+        ]
+        self.assertTrue(any(item == "Cookie: real-cookie-value" for item in headers))
+
+    def test_recover_failure_increments_attempts(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-fail"
+        staging.mkdir(parents=True)
+        self._error16_task(staging)
+
+        class PlanOkExecBoom:
+            def __init__(self, cookie):
                 self.cookie = cookie
 
             def list_files(self, path):
                 return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
 
             def download_entries(self, fids):
-                return [
-                    {
-                        "fid": "f1",
-                        "name": "ep.mkv",
-                        "download_url": "https://cdn.example/ep.mkv",
-                    }
-                ]
+                from qas_client import ClientError
 
-        with patch("resource_agent.QuarkClient", FakeQuark):
-            result = self.agent.recover_quark_download("rd-test")
+                raise ClientError("url failed")
 
-        self.assertEqual(result["status"], "active")
-        self.assertEqual(seen, ["real-cookie-value"])
-        headers = [call for call in self.aria.calls if call[0] == "add_uri"][0][2][
-            "header"
-        ]
-        self.assertTrue(
-            any(item == "Cookie: real-cookie-value" for item in headers)
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}):
+            with patch("resource_agent.QuarkClient", PlanOkExecBoom):
+                planned = self.agent.plan_quark_recovery("rd-test")
+                with self.assertRaisesRegex(AgentError, "QUARK_DOWNLOAD_URL_ERROR"):
+                    self.agent.execute_quark_recovery(planned["planId"], confirmed=True)
+        refreshed = self.store.get_task("rd-test")
+        self.assertEqual(refreshed["recover_attempts"], 1)
+        self.assertEqual(refreshed["recovery"]["status"], "failed")
+        self.assertEqual(
+            refreshed["recovery"]["lastErrorCode"], "QUARK_DOWNLOAD_URL_ERROR"
         )
-
-    def test_error_16_skips_auto_recover_when_attempts_exhausted(self):
-        staging = Path(self.temp_dir.name) / "incoming" / "rd-cap"
+    def test_ready_task_cannot_recover(self):
+        staging = Path(self.temp_dir.name) / "incoming" / "rd-ready"
         staging.mkdir(parents=True)
         task = self.store.get_task("rd-test")
-        task["status"] = "error"
-        task["aria2_gids"] = ["bad"]
-        task["cloud_path"] = "/OpenClaw/Movie/rd-test"
-        task["staging_path"] = str(staging)
-        task["aria2_dir"] = str(staging)
-        task["recover_attempts"] = 2
-        self.store.upsert_task(task)
-        self.aria.stopped = [
-            {
-                "gid": "bad",
-                "status": "error",
-                "totalLength": "100",
-                "completedLength": "0",
-                "downloadSpeed": "0",
-                "dir": str(staging),
-                "files": [],
-                "errorCode": "16",
-                "errorMessage": "Download aborted.",
-            }
-        ]
-
-        with patch("resource_agent.QuarkClient") as quark_cls:
-            result = self.agent.downloads_list()["tasks"][0]
-
-        quark_cls.assert_not_called()
-        self.assertEqual(result["status"], "error")
-        self.assertTrue(any("aria2_error_16" in note for note in result["notes"]))
-        self.assertTrue(any("exhausted" in note for note in result["notes"]))
-
-    def test_recover_command_repush_with_cookie(self):
-        staging = Path(self.temp_dir.name) / "incoming" / "rd-manual"
-        staging.mkdir(parents=True)
-        task = self.store.get_task("rd-test")
-        task["status"] = "error"
-        task["aria2_gids"] = ["bad"]
-        task["cloud_path"] = "/OpenClaw/Movie/rd-test"
+        task["status"] = "ready"
         task["staging_path"] = str(staging)
         task["aria2_dir"] = str(staging)
         self.store.upsert_task(task)
-
-        class FakeQuark:
-            def __init__(self, cookie):
-                pass
-
-            def list_files(self, path):
-                return [{"fid": "f1", "name": "ep.mkv", "size": 10}]
-
-            def download_entries(self, fids):
-                return [
-                    {
-                        "fid": "f1",
-                        "name": "ep.mkv",
-                        "download_url": "https://cdn.example/ep.mkv",
-                    }
-                ]
-
-        with patch("resource_agent.QuarkClient", FakeQuark):
-            result = self.agent.recover_quark_download("rd-test")
-
-        self.assertEqual(result["status"], "active")
-        self.assertEqual(result["recoveredFiles"], 1)
-        self.assertEqual(self.store.get_task("rd-test")["recover_attempts"], 1)
+        with patch.dict(os.environ, {"QUARK_RECOVERY_ENABLED": "true"}):
+            with self.assertRaisesRegex(AgentError, "not eligible"):
+                self.agent.plan_quark_recovery("rd-test")
 
     def test_check_ready_reports_ready(self):
         roots = [

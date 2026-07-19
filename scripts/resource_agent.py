@@ -27,6 +27,63 @@ from download_fs import (
 
 
 MAX_QUARK_RECOVER_ATTEMPTS = 2
+ALLOWED_RECOVERY_STATES = {"error", "partial_failed"}
+RECOVER_PLAN_ACTION = "recover_download"
+
+
+def _recover_max_attempts() -> int:
+    try:
+        value = int(
+            os.environ.get("QUARK_RECOVERY_MAX_ATTEMPTS") or MAX_QUARK_RECOVER_ATTEMPTS
+        )
+    except (TypeError, ValueError):
+        value = MAX_QUARK_RECOVER_ATTEMPTS
+    return max(1, min(value, 5))
+
+
+def _recover_cooldown_seconds() -> int:
+    try:
+        value = int(os.environ.get("QUARK_RECOVERY_COOLDOWN_SECONDS") or 300)
+    except (TypeError, ValueError):
+        value = 300
+    return max(0, min(value, 3600))
+
+
+def _quark_recovery_enabled() -> bool:
+    raw = str(os.environ.get("QUARK_RECOVERY_ENABLED", "false")).strip().casefold()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _recovery_state(task: dict) -> dict:
+    raw = task.get("recovery")
+    state = dict(raw) if isinstance(raw, dict) else {}
+    attempts = int(task.get("recover_attempts") or state.get("attempts") or 0)
+    state.setdefault("attempts", attempts)
+    state.setdefault("maxAttempts", _recover_max_attempts())
+    state.setdefault("status", "idle")
+    state.setdefault("lastErrorCode", "")
+    state.setdefault("lastAttemptAt", 0)
+    state.setdefault("cooldownUntil", 0)
+    return state
+
+
+def _staging_has_payload(staging: Path) -> bool:
+    if not staging.is_dir():
+        return False
+    try:
+        return any(
+            path.is_file() and path.suffix.casefold() not in {".aria2"}
+            for path in staging.rglob("*")
+        )
+    except OSError:
+        return False
+
+
+def _int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class AgentError(RuntimeError):
@@ -40,13 +97,6 @@ class CliUsageError(ValueError):
 class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise CliUsageError("invalid command or arguments")
-
-
-def _int(value) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _qas_cookie(config: dict | None) -> str:
@@ -169,30 +219,6 @@ class ResourceAgent:
             ]
             task["status"] = _aggregate_aria_status(items)
             self.store.upsert_task(task)
-            if self._should_auto_recover_quark(task, items):
-                try:
-                    recovered = self.recover_quark_download(task["task_id"])
-                    new_dir = str(recovered.get("aria2Dir") or task["aria2_dir"]).rstrip(
-                        "/"
-                    )
-                    recovered_gids = {
-                        str(gid) for gid in (recovered.get("aria2Gids") or [])
-                    }
-                    # Prefer newly pushed GIDs so stale error-16 results cannot
-                    # immediately overwrite the recovered active status.
-                    fresh = [
-                        item
-                        for item in self._aria_items()
-                        if str(item.get("dir", "")).rstrip("/") == new_dir
-                        and (
-                            not recovered_gids
-                            or str(item.get("gid") or "") in recovered_gids
-                        )
-                    ]
-                    by_dir[new_dir] = fresh
-                except Exception:
-                    # Keep original error status; notes explain next step.
-                    pass
         return by_dir
 
     def _cloud_path_for_task(self, task: dict) -> str:
@@ -206,38 +232,79 @@ class ResourceAgent:
             prefix = str(route["cloud_prefix"]).rstrip("/")
         return f"{prefix}/{task['task_id']}"
 
-    def _should_auto_recover_quark(self, task: dict, items: list[dict]) -> bool:
+    def _assess_recovery(self, task: dict, items: list[dict]) -> dict:
+        """Read-only eligibility for Quark Cookie re-push. Never mutates downloads."""
+        recovery = _recovery_state(task)
+        max_attempts = _recover_max_attempts()
+        now = int(__import__("time").time())
+        result = {
+            "eligible": False,
+            "reason": "",
+            "attempts": int(recovery.get("attempts") or 0),
+            "maxAttempts": max_attempts,
+            "status": str(recovery.get("status") or "idle"),
+            "cooldownUntil": int(recovery.get("cooldownUntil") or 0),
+            "lastErrorCode": str(recovery.get("lastErrorCode") or ""),
+            "enabled": _quark_recovery_enabled(),
+        }
+        if not _quark_recovery_enabled():
+            result["reason"] = "quark_recovery_disabled"
+            return result
         if self.qas is None:
-            return False
-        if int(task.get("recover_attempts") or 0) >= MAX_QUARK_RECOVER_ATTEMPTS:
-            return False
+            result["reason"] = "qas_unavailable"
+            return result
+        if task["status"] not in ALLOWED_RECOVERY_STATES:
+            result["reason"] = "status_not_recoverable"
+            return result
+        if int(recovery.get("attempts") or 0) >= max_attempts:
+            result["reason"] = "recovery_exhausted"
+            result["status"] = "exhausted"
+            return result
+        if int(recovery.get("cooldownUntil") or 0) > now:
+            result["reason"] = "recovery_cooldown"
+            result["status"] = "cooldown"
+            return result
         if not items:
-            return False
-        # All tracked downloads aborted at 0 bytes with aria2 code 16.
+            result["reason"] = "no_aria2_items"
+            return result
+        codes = {
+            str(item.get("errorCode") or "")
+            for item in items
+            if str(item.get("errorCode") or "") not in {"", "0"}
+        }
+        if codes != {"16"}:
+            result["reason"] = "error_codes_not_only_16"
+            return result
         for item in items:
-            if str(item.get("errorCode") or "") != "16":
-                return False
-            if _int(item.get("completedLength")) > 0:
-                return False
-        staging = Path(task["staging_path"])
-        if staging.is_dir():
-            try:
-                if any(
-                    path.is_file() and path.suffix.casefold() not in {".aria2"}
-                    for path in staging.rglob("*")
-                ):
-                    return False
-            except OSError:
-                return False
-        return True
+            if str(item.get("errorCode") or "") == "16" and _int(
+                item.get("completedLength")
+            ) > 0:
+                result["reason"] = "partial_bytes_present"
+                return result
+            if str(item.get("status") or "") == "complete":
+                result["reason"] = "complete_gid_present"
+                return result
+        if _staging_has_payload(Path(task["staging_path"])):
+            result["reason"] = "staging_has_files"
+            return result
+        result["eligible"] = True
+        result["reason"] = "aria2_error_16"
+        result["status"] = "recoverable"
+        return result
 
-    def recover_quark_download(self, task_id: str) -> dict:
-        """Re-push Quark cloud files into aria2 with Cookie headers."""
-        if self.qas is None:
-            raise AgentError("QAS is required to recover Quark downloads")
+    def plan_quark_recovery(self, task_id: str) -> dict:
+        by_dir = self._synchronize()
         task = self.store.get_task(task_id)
         if task is None:
             raise AgentError("task not found")
+        items = by_dir.get(str(task["aria2_dir"]).rstrip("/"), [])
+        assessment = self._assess_recovery(task, items)
+        if not assessment["eligible"]:
+            raise AgentError(
+                f"recovery not eligible: {assessment['reason']}"
+            )
+        cloud_path = self._cloud_path_for_task(task)
+        # List cloud files for the plan only (no aria2 mutation).
         try:
             config = self.qas.get_config()
         except Exception as error:
@@ -245,12 +312,128 @@ class ResourceAgent:
         cookie = _qas_cookie(config)
         if not cookie:
             raise AgentError("QAS cookie is not configured")
-
-        cloud_path = self._cloud_path_for_task(task)
-        quark = QuarkClient(cookie)
-        files = quark.list_files(cloud_path)
+        try:
+            files = QuarkClient(cookie).list_files(cloud_path)
+        except ClientError as error:
+            raise AgentError(str(error)) from None
         if not files:
             raise AgentError(f"no files found on Quark path {cloud_path}")
+        total_bytes = sum(int(item.get("size") or 0) for item in files)
+        staging = Path(task["staging_path"])
+        existing_names = []
+        if staging.is_dir():
+            try:
+                existing_names = sorted(
+                    path.name for path in staging.iterdir() if path.is_file()
+                )
+            except OSError:
+                existing_names = []
+        payload = {
+            "taskId": task_id,
+            "cloudPath": cloud_path,
+            "aria2Dir": task["aria2_dir"],
+            "stagingPath": task["staging_path"],
+            "files": [
+                {"name": item["name"], "size": int(item.get("size") or 0)}
+                for item in files
+            ],
+            "fileCount": len(files),
+            "totalBytes": total_bytes,
+            "existingStagingFiles": existing_names,
+            "mayOverwriteStaging": bool(existing_names),
+            "recoverAttempts": assessment["attempts"],
+            "maxAttempts": assessment["maxAttempts"],
+            "sideEffects": [
+                "read_qas_cookie",
+                "call_quark_download_api",
+                "remove_failed_aria2_results",
+                "add_aria2_uris_with_cookie_headers",
+                "may_overwrite_staging_files",
+            ],
+        }
+        plan_id = self.store.create_plan(RECOVER_PLAN_ACTION, payload)
+        return {
+            "planId": plan_id,
+            "action": RECOVER_PLAN_ACTION,
+            "nextAction": "confirm_recover",
+            **payload,
+        }
+
+    def execute_quark_recovery(self, plan_id: str, *, confirmed: bool = False) -> dict:
+        if not confirmed:
+            raise AgentError("recovery execute requires --confirmed")
+        if not _quark_recovery_enabled():
+            raise AgentError("Quark recovery is disabled (QUARK_RECOVERY_ENABLED)")
+        try:
+            payload = self.store.consume_plan(plan_id, RECOVER_PLAN_ACTION)
+        except PlanError as error:
+            raise AgentError(str(error)) from None
+        task_id = str(payload.get("taskId") or "")
+        return self._run_quark_recovery(task_id, planned=payload)
+
+    def _run_quark_recovery(self, task_id: str, *, planned: dict | None = None) -> dict:
+        """Mutating Quark→aria2 re-push. Attempts increment before external calls."""
+        if self.qas is None:
+            raise AgentError("QAS is required to recover Quark downloads")
+        by_dir = self._synchronize()
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise AgentError("task not found")
+        items = by_dir.get(str(task["aria2_dir"]).rstrip("/"), [])
+        assessment = self._assess_recovery(task, items)
+        if not assessment["eligible"]:
+            raise AgentError(
+                f"recovery not eligible: {assessment['reason']}"
+            )
+
+        now = int(__import__("time").time())
+        recovery = _recovery_state(task)
+        recovery["attempts"] = int(recovery.get("attempts") or 0) + 1
+        recovery["lastAttemptAt"] = now
+        recovery["status"] = "running"
+        recovery["maxAttempts"] = _recover_max_attempts()
+        task["recover_attempts"] = recovery["attempts"]
+        task["recovery"] = recovery
+        self.store.upsert_task(task)
+
+        def _fail(code: str, message: str) -> None:
+            latest = self.store.get_task(task_id) or task
+            state = _recovery_state(latest)
+            state["attempts"] = int(task["recover_attempts"])
+            state["lastErrorCode"] = code
+            state["lastAttemptAt"] = now
+            state["cooldownUntil"] = now + _recover_cooldown_seconds()
+            state["status"] = (
+                "exhausted"
+                if state["attempts"] >= _recover_max_attempts()
+                else "failed"
+            )
+            latest["recovery"] = state
+            latest["recover_attempts"] = state["attempts"]
+            # Keep download status as error/partial_failed from sync.
+            self.store.upsert_task(latest)
+            raise AgentError(f"{code}: {message}")
+
+        try:
+            config = self.qas.get_config()
+        except Exception as error:
+            _fail("QAS_CONFIG_ERROR", str(error))
+            raise  # pragma: no cover
+        cookie = _qas_cookie(config)
+        if not cookie:
+            _fail("QUARK_COOKIE_MISSING", "QAS cookie is not configured")
+
+        cloud_path = str(
+            (planned or {}).get("cloudPath") or self._cloud_path_for_task(task)
+        )
+        try:
+            quark = QuarkClient(cookie)
+            files = quark.list_files(cloud_path)
+        except ClientError as error:
+            _fail("QUARK_API_ERROR", str(error))
+            raise  # pragma: no cover
+        if not files:
+            _fail("QUARK_PATH_EMPTY", f"no files found on Quark path {cloud_path}")
 
         staging = Path(task["staging_path"])
         try:
@@ -258,43 +441,52 @@ class ResourceAgent:
         except OSError:
             pass
 
-        # Drop failed zero-byte results so they stop dominating sync.
         for gid in list(task.get("aria2_gids") or []):
             try:
                 self.aria.remove_result(str(gid))
             except Exception:
                 pass
 
-        entries = quark.download_entries([item["fid"] for item in files])
+        try:
+            entries = quark.download_entries([item["fid"] for item in files])
+        except ClientError as error:
+            _fail("QUARK_DOWNLOAD_URL_ERROR", str(error))
+            raise  # pragma: no cover
         if not entries:
-            raise AgentError("Quark download URLs unavailable")
+            _fail("QUARK_DOWNLOAD_URL_EMPTY", "Quark download URLs unavailable")
 
-        # Prefer download-response Set-Cookie when Quark rotates CDN auth.
         aria_cookie = str(entries[0].get("cookie") or cookie).strip() or cookie
-
         gids: list[str] = []
-        for entry in entries:
-            gid = self.aria.add_uri(
-                [entry["download_url"]],
-                options={
-                    "dir": task["aria2_dir"],
-                    "out": entry["name"],
-                    "header": [
-                        f"Cookie: {aria_cookie}",
-                        "Referer: https://pan.quark.cn/",
-                        f"User-Agent: {USER_AGENT}",
-                    ],
-                    "continue": "true",
-                    "allow-overwrite": "true",
-                    "max-connection-per-server": "1",
-                },
-            )
-            gids.append(str(gid))
+        try:
+            for entry in entries:
+                gid = self.aria.add_uri(
+                    [entry["download_url"]],
+                    options={
+                        "dir": task["aria2_dir"],
+                        "out": entry["name"],
+                        "header": [
+                            f"Cookie: {aria_cookie}",
+                            "Referer: https://pan.quark.cn/",
+                            f"User-Agent: {USER_AGENT}",
+                        ],
+                        "continue": "true",
+                        "allow-overwrite": "true",
+                        "max-connection-per-server": "1",
+                    },
+                )
+                gids.append(str(gid))
+        except Exception as error:
+            _fail("ARIA2_ADD_URI_ERROR", str(error))
+            raise  # pragma: no cover
 
+        recovery["status"] = "submitted"
+        recovery["lastErrorCode"] = ""
+        recovery["cooldownUntil"] = 0
         task["cloud_path"] = cloud_path
         task["aria2_gids"] = gids
         task["status"] = "active"
-        task["recover_attempts"] = int(task.get("recover_attempts") or 0) + 1
+        task["recovery"] = recovery
+        task["recover_attempts"] = recovery["attempts"]
         self.store.upsert_task(task)
         return {
             "taskId": task_id,
@@ -303,7 +495,8 @@ class ResourceAgent:
             "recoveredFiles": len(entries),
             "aria2Gids": gids,
             "aria2Dir": task["aria2_dir"],
-            "recoverAttempts": task["recover_attempts"],
+            "recoverAttempts": recovery["attempts"],
+            "nextAction": "monitor_download",
             "note": "re-pushed Quark cloud files into aria2 with Cookie headers",
         }
 
@@ -354,21 +547,12 @@ class ResourceAgent:
                 "or Quark/QAS failed to push files"
             )
         if "16" in error_codes and staging_files == 0:
-            attempts = int(task.get("recover_attempts") or 0)
-            if attempts >= MAX_QUARK_RECOVER_ATTEMPTS:
-                notes.append(
-                    "aria2_error_16: auto Cookie re-push exhausted - file is usually "
-                    "already on Quark under /OpenClaw/...; run "
-                    "`downloads recover TASK_ID` after fixing QAS cookie, "
-                    "do not keep re-execute/plan"
-                )
-            else:
-                notes.append(
-                    "aria2_error_16: Download aborted at 0 bytes after Quark transfer - "
-                    "usually missing Cookie on aria2 push; auto-recover will re-push "
-                    "from Quark with Cookie on next downloads list/show "
-                    f"(attempt {attempts}/{MAX_QUARK_RECOVER_ATTEMPTS})"
-                )
+            notes.append(
+                "aria2_error_16: Download aborted at 0 bytes after Quark transfer - "
+                "usually missing Cookie on aria2 push; do not re-execute/plan. "
+                "If recovery.eligible, run `downloads recover plan TASK_ID` then "
+                "`downloads recover execute PLAN_ID --confirmed`"
+            )
         if task["status"] == "error" and staging_files == 0 and not staging_exists:
             notes.append(
                 "staging_missing: aria2 target dir was never created on disk"
@@ -381,6 +565,14 @@ class ResourceAgent:
                 "aria2_partial_failed: not all GIDs complete - "
                 "task cannot validate/organize until every transfer finishes"
             )
+        recovery = self._assess_recovery(task, items)
+        next_action = "none"
+        if recovery.get("eligible"):
+            next_action = "confirm_recover"
+        elif recovery.get("reason") == "recovery_exhausted":
+            next_action = "recovery_exhausted"
+        elif recovery.get("reason") == "quark_recovery_disabled" and "16" in error_codes:
+            next_action = "enable_quark_recovery"
         return {
             "taskId": task["task_id"],
             "title": task["title"],
@@ -399,6 +591,8 @@ class ResourceAgent:
             "errors": errors,
             "errorCodes": error_codes,
             "notes": notes,
+            "recovery": recovery,
+            "nextAction": next_action,
         }
 
     def downloads_list(self) -> dict:
@@ -418,7 +612,7 @@ class ResourceAgent:
         tasks = self.downloads_list()["tasks"]
         for task in tasks:
             if task["taskId"] == task_id:
-                return {"task": task}
+                return task
         raise AgentError("task not found")
 
     def downloads_control(self, task_id: str, action: str) -> dict:
@@ -687,7 +881,7 @@ def _load_runtime(command: str | None = None):
     needs_aria = command in {None, "check-ready", "downloads", "execute"}
     # PanSou is optional supplemental discovery; never hard-required.
     needs_pansou = command in {None, "search"}
-    # downloads list/show can auto-recover error-16 using QAS cookie when present.
+    # downloads recover plan/execute needs QAS cookie when present.
     optional_qas_for_downloads = (
         command == "downloads"
         and bool(os.environ.get("QAS_BASE_URL"))
@@ -850,7 +1044,12 @@ def parse_args(argv) -> argparse.Namespace:
     show = downloads_sub.add_parser("show")
     show.add_argument("task_id")
     recover = downloads_sub.add_parser("recover")
-    recover.add_argument("task_id")
+    recover_sub = recover.add_subparsers(dest="recover_command", required=True)
+    recover_plan = recover_sub.add_parser("plan")
+    recover_plan.add_argument("task_id")
+    recover_execute = recover_sub.add_parser("execute")
+    recover_execute.add_argument("plan_id")
+    recover_execute.add_argument("--confirmed", action="store_true")
     validate = downloads_sub.add_parser("validate")
     validate.add_argument("task_id")
     for command in ("pause", "resume", "cancel"):
@@ -1081,15 +1280,27 @@ def main(
                 next_action="none",
             )
         elif args.download_command == "show":
+            shown = agent.downloads_show(args.task_id)
             result = success(
-                agent.downloads_show(args.task_id),
-                next_action="none",
+                shown,
+                next_action=str(shown.get("nextAction") or "none"),
             )
         elif args.download_command == "recover":
-            result = success(
-                agent.recover_quark_download(args.task_id),
-                next_action="monitor_download",
-            )
+            if args.recover_command == "plan":
+                planned = agent.plan_quark_recovery(args.task_id)
+                result = success(
+                    planned,
+                    next_action=str(planned.get("nextAction") or "confirm_recover"),
+                )
+            else:
+                recovered = agent.execute_quark_recovery(
+                    args.plan_id,
+                    confirmed=bool(getattr(args, "confirmed", False)),
+                )
+                result = success(
+                    recovered,
+                    next_action=str(recovered.get("nextAction") or "monitor_download"),
+                )
         elif args.download_command == "validate":
             organizer = organizer_factory(routing, store)
             report = organizer.validator.validate(args.task_id)

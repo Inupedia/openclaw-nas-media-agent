@@ -11,7 +11,7 @@
 ## 本地库
 
 ```text
-{baseDir}/bin/mediactl library "作品名" [--media-type anime]
+{baseDir}/bin/mediactl library lookup "作品名" [--media-type anime]
 ```
 
 ## 搜索与导入
@@ -50,16 +50,24 @@
 ```text
 {baseDir}/bin/mediactl downloads list
 {baseDir}/bin/mediactl downloads show TASK_ID
-{baseDir}/bin/mediactl downloads recover TASK_ID
 {baseDir}/bin/mediactl downloads pause TASK_ID
 {baseDir}/bin/mediactl downloads resume TASK_ID
 {baseDir}/bin/mediactl downloads cancel TASK_ID
 {baseDir}/bin/mediactl downloads validate TASK_ID
 ```
 
-只能控制 JSON 中出现的自有 `taskId`。取消默认保留已下载数据。
+`list/show` 只同步并报告状态（L0），**不会**自动重推下载。
 
-`downloads list/show` 在遇到 aria2 error 16（0 字节中止）时，会自动从夸克带 Cookie 重推到 aria2（每任务最多 2 次）。仍失败时再用 `downloads recover`。
+## 夸克恢复（error 16）
+
+需环境变量 `QUARK_RECOVERY_ENABLED=true`。
+
+```text
+{baseDir}/bin/mediactl downloads recover plan TASK_ID
+{baseDir}/bin/mediactl downloads recover execute PLAN_ID --confirmed
+```
+
+仅当 `recovery.eligible=true`（通常 `status=error|partial_failed` 且仅 error 16、暂存无有效文件）时可以 plan。执行必须 `--confirmed`。
 
 ## 整理
 

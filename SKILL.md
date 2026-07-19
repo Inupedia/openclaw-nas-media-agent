@@ -1,7 +1,7 @@
 ---
 name: resource-download-agent
 description: Use when 搜索/预览 NAS 影视动画、追更补集、下载监控暂停、校验整理入库；删除受保护库内容时拒绝。
-version: 0.3.0
+version: 0.4.0
 homepage: https://github.com/Inupedia/openclaw-nas-media-agent
 metadata:
   openclaw:
@@ -45,6 +45,15 @@ metadata:
       - name: RESOURCE_AGENT_STATE_DB
         required: false
         description: Agent state DB path; defaults under skill data/
+      - name: QUARK_RECOVERY_ENABLED
+        required: false
+        description: Enable confirmed Quark Cookie re-push (default false)
+      - name: QUARK_RECOVERY_MAX_ATTEMPTS
+        required: false
+        description: Max Quark recovery attempts per task (default 2)
+      - name: QUARK_RECOVERY_COOLDOWN_SECONDS
+        required: false
+        description: Cooldown after failed recovery attempt (default 300)
       - name: VIDEOMGR_ENABLED
         required: false
         description: Enable UGREEN Theater local search auto/1/0
@@ -85,13 +94,14 @@ metadata:
 ## 不变量
 
 1. 所有系统操作只通过 `{baseDir}/bin/mediactl`。
-2. `search` / `preview` / `tree` / `library` / `import-url` 无写入副作用；不得为“看看内容”而 `execute`。
+2. `search` / `preview` / `tree` / `library` / `import-url` 不产生转存、下载或媒体文件写入；允许写入本地候选状态库。不得为“看看内容”而 `execute`。
 3. 任何下载必须经过：`candidate` → `tree` → 用户确认 `node` → `plan download` → 用户确认 → `execute ... --confirmed`。
 4. 任何入库必须经过：`complete` → `validate` → `organize plan` → 用户确认 → `organize execute --confirmed`。
-5. JSON `terminal: true` 时立即停止；只按 `status` / `nextAction` 分支，不凭文字猜测。
+5. JSON `terminal: true` 时立即停止；只按 `status` / `nextAction` / `recovery` 分支，不凭文字猜测。
 6. `/volume2/影视` 与 `/volume3/临时影视` 永不删除、覆盖或移出；即使用户要求也拒绝。整条回复只能是：`拒绝：OpenClaw 不会删除或协助删除受保护媒体库中的内容。`
 7. `mediactl` 失败时不得改用其他工具、脚本、HTTP、或 `web_search` / `web_fetch` 找片。
 8. 不得输出 Cookie、Token、RPC Secret、Header、环境变量或原始底层响应。
+9. `downloads list/show` 只读同步状态；禁止因查询而重推下载。error 16 仅当 `nextAction=confirm_recover` 时，经用户确认后走 `downloads recover plan` → `downloads recover execute ... --confirmed`。
 
 ## 状态机
 
@@ -107,6 +117,8 @@ metadata:
 | `ready_to_organize` | `organize plan`，再确认后 `organize execute --confirmed` |
 | `quarantine_download` / `quarantined` | 报告问题并停止；人工修好后可再 `validate` |
 | `partial_failed` / `error` | 报告并停止；不自动重试或重新 `execute` |
+| `confirm_recover` | 展示 `recovery`；确认后 `downloads recover plan` → `downloads recover execute PLAN_ID --confirmed` |
+| `recovery_exhausted` / `enable_quark_recovery` | 报告并停止；不要循环 `list/show` 试图自愈 |
 | `organized` | 报告最终路径并停止 |
 | `terminal: true` | 无条件停止 |
 
@@ -117,7 +129,7 @@ metadata:
 - 多个 `candidateId` / `specificationGroups`：用户选，不得代选。
 - `mediaType` 与 `finalPath`：必须来自 `plan download` 返回值；不确定 anime/drama 时先问（仅有 `SxxExx` 不能默认 drama）。
 - 同一季多版本目录：用户选一版。
-- 每次 `execute`（下载）与每次 `organize execute`：对话确认后，命令必须带 `--confirmed`。脚本也会强制确认。
+- 每次 `execute`（下载）、每次 `downloads recover execute`、每次 `organize execute`：对话确认后，命令必须带 `--confirmed`。脚本也会强制确认。
 - 干跑 / “只要方案”：做到 `plan` 即停，禁止 `execute`。
 
 ## 轮询与重试预算
@@ -125,7 +137,8 @@ metadata:
 - `execute` 后立即 `downloads show` 一次。
 - 同一轮对话最多共查询 **3** 次下载状态。
 - `submitted` 且无 GID、无暂存文件：停止并说明转存可能未产生下载；**不要**自动再次 `execute`。
-- `partial_failed` / `error`：停止；用户明确要求重试时，必须重新 `plan`，不得复用旧 plan 盲重试。
+- `partial_failed` / `error`：停止；用户明确要求重试普通下载时，必须重新 `plan download`，不得复用旧 plan 盲重试。
+- error 16 且 `confirm_recover`：只走 recover 计划/确认执行，不得用 `list/show` 触发副作用。
 
 ## 输出顺序
 

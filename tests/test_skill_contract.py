@@ -23,6 +23,7 @@ KNOWN_NOTES = {
     "staging_only",
     "staging_missing",
     "aria2_error_18",
+    "aria2_error_16",
     "aria2_partial_failed",
 }
 KNOWN_NEXT_ACTIONS = {
@@ -36,6 +37,9 @@ KNOWN_NEXT_ACTIONS = {
     "ready",
     "monitor_download",
     "review_plan",
+    "confirm_recover",
+    "enable_quark_recovery",
+    "recovery_exhausted",
 }
 
 
@@ -141,6 +145,16 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("--node", self.bundle)
         self.assertIn("choose_tree_nodes", self.content)
         self.assertIn("execute PLAN_ID --confirmed", self.content)
+
+    def test_skill_recover_requires_confirmation_and_forbids_list_side_effects(self):
+        self.assertIn("version: 0.4.0", self.frontmatter)
+        self.assertIn("confirm_recover", self.content)
+        self.assertIn("downloads recover plan", self.bundle)
+        self.assertIn("downloads recover execute PLAN_ID --confirmed", self.bundle)
+        self.assertIn("QUARK_RECOVERY_ENABLED", self.bundle)
+        self.assertIn("list/show` 只读同步", self.content)
+        self.assertNotIn("会自动带 Cookie 重推", self.bundle)
+        self.assertNotIn("auto-recover will re-push", self.bundle)
 
     def test_skill_permanently_protects_formal_libraries(self):
         self.assertIn("/volume2/影视", self.content)

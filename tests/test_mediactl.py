@@ -117,7 +117,10 @@ class MediaCtlContractTests(unittest.TestCase):
 
     def test_parser_supports_validation_and_separate_organize_plan(self):
         validate = parse_args(["downloads", "validate", "rd-show"])
-        recover = parse_args(["downloads", "recover", "rd-show"])
+        recover_plan = parse_args(["downloads", "recover", "plan", "rd-show"])
+        recover_execute = parse_args(
+            ["downloads", "recover", "execute", "plan-recover", "--confirmed"]
+        )
         organize_plan = parse_args(["organize", "plan", "rd-show"])
         organize_execute = parse_args(
             ["organize", "execute", "plan-example", "--confirmed"]
@@ -125,8 +128,12 @@ class MediaCtlContractTests(unittest.TestCase):
 
         self.assertEqual(validate.download_command, "validate")
         self.assertEqual(validate.task_id, "rd-show")
-        self.assertEqual(recover.download_command, "recover")
-        self.assertEqual(recover.task_id, "rd-show")
+        self.assertEqual(recover_plan.download_command, "recover")
+        self.assertEqual(recover_plan.recover_command, "plan")
+        self.assertEqual(recover_plan.task_id, "rd-show")
+        self.assertEqual(recover_execute.recover_command, "execute")
+        self.assertEqual(recover_execute.plan_id, "plan-recover")
+        self.assertTrue(recover_execute.confirmed)
         self.assertEqual(organize_plan.organize_command, "plan")
         self.assertEqual(organize_plan.task_id, "rd-show")
         self.assertEqual(organize_execute.organize_command, "execute")

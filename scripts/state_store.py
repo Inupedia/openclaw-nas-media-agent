@@ -59,6 +59,7 @@ class StateStore:
               aria2_dir TEXT NOT NULL DEFAULT '',
               cloud_path TEXT NOT NULL DEFAULT '',
               recover_attempts INTEGER NOT NULL DEFAULT 0,
+              recovery_json TEXT NOT NULL DEFAULT '{}',
               staging_path TEXT NOT NULL,
               final_path TEXT NOT NULL,
               status TEXT NOT NULL,
@@ -101,6 +102,11 @@ class StateStore:
             self.connection.execute(
                 "ALTER TABLE tasks ADD COLUMN recover_attempts "
                 "INTEGER NOT NULL DEFAULT 0"
+            )
+        if "recovery_json" not in columns:
+            self.connection.execute(
+                "ALTER TABLE tasks ADD COLUMN recovery_json "
+                "TEXT NOT NULL DEFAULT '{}'"
             )
         if "title_key" not in columns:
             self.connection.execute(
@@ -277,14 +283,19 @@ class StateStore:
             expected_manifest = {}
         if not isinstance(expected_manifest, dict):
             raise PlanError("expected_manifest must be an object")
+        recovery = task.get("recovery")
+        if recovery is None:
+            recovery = {}
+        if not isinstance(recovery, dict):
+            raise PlanError("recovery must be an object")
         self.connection.execute(
             """
             INSERT INTO tasks (
               task_id, title, title_key, media_type, qas_task_name,
               aria2_gids_json, episode_keys_json, expected_manifest_json,
-              aria2_dir, cloud_path, recover_attempts,
+              aria2_dir, cloud_path, recover_attempts, recovery_json,
               staging_path, final_path, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
               title = excluded.title,
               title_key = excluded.title_key,
@@ -296,6 +307,7 @@ class StateStore:
               aria2_dir = excluded.aria2_dir,
               cloud_path = excluded.cloud_path,
               recover_attempts = excluded.recover_attempts,
+              recovery_json = excluded.recovery_json,
               staging_path = excluded.staging_path,
               final_path = excluded.final_path,
               status = excluded.status,
@@ -313,6 +325,7 @@ class StateStore:
                 task.get("aria2_dir", ""),
                 task.get("cloud_path", ""),
                 int(task.get("recover_attempts") or 0),
+                json.dumps(recovery, ensure_ascii=False, separators=(",", ":")),
                 task["staging_path"],
                 task["final_path"],
                 task["status"],
@@ -343,6 +356,16 @@ class StateStore:
                 expected_manifest = json.loads(manifest_raw or "{}")
             except json.JSONDecodeError:
                 expected_manifest = {}
+            try:
+                recovery = (
+                    json.loads(row["recovery_json"])
+                    if "recovery_json" in keys and row["recovery_json"]
+                    else {}
+                )
+            except json.JSONDecodeError:
+                recovery = {}
+            if not isinstance(recovery, dict):
+                recovery = {}
             results.append(
                 {
                     "task_id": row["task_id"],
@@ -360,6 +383,7 @@ class StateStore:
                     "recover_attempts": int(
                         row["recover_attempts"] if "recover_attempts" in keys else 0
                     ),
+                    "recovery": recovery,
                     "staging_path": row["staging_path"],
                     "final_path": row["final_path"],
                     "status": row["status"],
