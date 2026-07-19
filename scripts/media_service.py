@@ -25,6 +25,126 @@ class MediaService:
         self.pansou = pansou
         self.jiaofu = jiaofu
 
+    def resolve_candidate_ref(
+        self,
+        candidate_id_or_url: str,
+        media_type: str | None = None,
+    ) -> str:
+        """Accept candidateId or a Quark share URL; return a persisted candidateId."""
+        share_url = normalize_quark_url(candidate_id_or_url)
+        if not share_url:
+            return str(candidate_id_or_url or "").strip()
+        opened = self.open_share(share_url, media_type)
+        data = opened.get("data") if isinstance(opened, dict) else None
+        if not isinstance(data, dict) or not data.get("candidateId"):
+            raise ClientError("failed to open quark share url")
+        return str(data["candidateId"])
+
+    def open_share(
+        self,
+        url: str,
+        media_type: str | None = None,
+    ) -> dict:
+        """Import a Quark share URL into a candidate and return search-shaped JSON."""
+        share_url = normalize_quark_url(url)
+        if not share_url:
+            raise ClientError("invalid quark share url")
+
+        try:
+            details = self.qas.get_share_preview(share_url)
+        except ClientError as error:
+            raise ClientError(str(error) or "share unavailable") from None
+
+        items = list(details.get("list", []) or [])
+        names = [
+            str(item.get("file_name", ""))
+            for item in items
+            if item.get("file_name") and not item.get("dir")
+        ]
+        share_meta = details.get("share") if isinstance(details.get("share"), dict) else {}
+        title = str(
+            share_meta.get("title")
+            or (names[0] if names else "")
+            or "未命名分享"
+        )
+        has_share_files = (
+            int(share_meta.get("file_only_num") or 0) > 0
+            or int(share_meta.get("video_total") or 0) > 0
+            or int(share_meta.get("all_file_num") or 0) > 0
+            or any(
+                item.get("dir") and int(item.get("include_items") or 0) > 0
+                for item in items
+                if isinstance(item, dict)
+            )
+            or bool(names)
+            or any(item.get("dir") for item in items if isinstance(item, dict))
+        )
+        if not has_share_files:
+            return success(
+                {
+                    "local": {"found": False, "queryTitle": title},
+                    "missing": [],
+                    "remoteCandidates": [],
+                    "candidateCount": 0,
+                    "rejectedCandidateCounts": {"empty": 1},
+                },
+                terminal=True,
+                next_action="no_candidates",
+            )
+        if names and all(name.casefold().endswith(ARCHIVE_EXTENSIONS) for name in names):
+            return success(
+                {
+                    "local": {"found": False, "queryTitle": title},
+                    "missing": [],
+                    "remoteCandidates": [],
+                    "candidateCount": 0,
+                    "rejectedCandidateCounts": {"archive_only": 1},
+                },
+                terminal=True,
+                next_action="no_candidates",
+            )
+
+        specification = extract_candidate_spec(details)
+        # Nested-only shares often have videoFileCount=0 until tree expands;
+        # still accept the URL so the agent can call tree next.
+        candidate = {
+            "taskname": title,
+            "title": title,
+            "shareurl": share_url,
+            "url": share_url,
+            "_discoverySources": ["share_url"],
+        }
+        candidate_id = self.store.create_candidate(
+            {
+                "query": share_url,
+                "mediaType": media_type,
+                "shareurl": share_url,
+                "candidate": candidate,
+                "details": details,
+                "specification": specification,
+            }
+        )
+        projected = {
+            "candidateId": candidate_id,
+            "title": title,
+            "provider": "quark",
+            "discoverySources": ["share_url"],
+            "specification": self._safe_specification(specification),
+        }
+        return success(
+            {
+                "local": {"found": False, "queryTitle": title},
+                "missing": [],
+                "remoteCandidates": [projected],
+                "specificationGroups": self._group_candidates([projected]),
+                "candidateCount": 1,
+                "candidateId": candidate_id,
+                "shareImported": True,
+            },
+            terminal=False,
+            next_action="tree",
+        )
+
     def search(
         self,
         query: str,
@@ -32,6 +152,11 @@ class MediaService:
         *,
         update: bool = False,
     ) -> dict:
+        share_url = normalize_quark_url(query)
+        if share_url:
+            # Direct share URL: import candidate; do not keyword-search the URL.
+            return self.open_share(share_url, media_type)
+
         local = self.catalog.lookup(query, media_type)
         if local.get("found") and not update:
             return success(
@@ -454,7 +579,8 @@ class MediaService:
             group["candidateCount"] = len(group["candidates"])
         return result
 
-    def preview(self, candidate_id: str) -> dict:
+    def preview(self, candidate_id: str, media_type: str | None = None) -> dict:
+        candidate_id = self.resolve_candidate_ref(candidate_id, media_type)
         candidate = self.store.get_candidate(candidate_id)
         details = self.qas.get_share_preview(candidate["shareurl"])
         candidate = dict(candidate)
@@ -497,7 +623,8 @@ class MediaService:
             next_action="plan_or_choose",
         )
 
-    def tree(self, candidate_id: str) -> dict:
+    def tree(self, candidate_id: str, media_type: str | None = None) -> dict:
+        candidate_id = self.resolve_candidate_ref(candidate_id, media_type)
         candidate = self.store.get_candidate(candidate_id)
         try:
             raw = self.qas.get_share_tree(candidate["shareurl"])

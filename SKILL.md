@@ -33,7 +33,7 @@ metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL
 ## 核心约束
 
 - 对作品或资源的询问，先调用 `search`。程序会先查 NAS 本地，再决定是否搜索远端。
-- 用户直接给出夸克分享链接时：先纳入候选流程（搜索/预览得到 `candidateId`），再 `tree` → 解释树 → 确认类型与落库 → `plan download --node ... [--media-type ...]`。不要跳过确认直接执行。
+- 用户直接给出夸克分享链接时：用 `search "https://pan.quark.cn/s/..."` 或 `share open "..."`（也可用 `tree "https://..."`）得到 `candidateId`，再 `tree` → 解释树 → 确认类型与落库 → `plan download --node ... [--media-type ...]`。不要用网页抓取或 `web_search` 代替；不要跳过确认直接执行。
 - JSON 返回 `terminal: true` 时，立即报告结果并停止所有工具调用。
 - `nextAction: stop_local_exists` 表示 NAS 已有该作品；不要联网、不要继续找远端版本。
 - `nextAction: already_up_to_date` 表示本地没有缺集；不要创建计划。
@@ -60,6 +60,14 @@ NAS 本地结果必须排在远端候选之前。
 
 ```text
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl search "作品名" --media-type anime
+```
+
+用户粘贴夸克分享链接（直接导入候选，`nextAction: tree`）：
+
+```text
+/root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl search "https://pan.quark.cn/s/xxxx"
+/root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl share open "https://pan.quark.cn/s/xxxx"
+/root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl tree "https://pan.quark.cn/s/xxxx"
 ```
 
 检查更新：

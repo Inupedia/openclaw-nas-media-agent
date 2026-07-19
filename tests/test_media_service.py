@@ -701,6 +701,92 @@ class MediaServiceTests(unittest.TestCase):
             ["qas"],
         )
 
+    def test_search_imports_quark_share_url_without_remote_keyword_search(self):
+        url = "https://pan.quark.cn/s/abcShare01?pwd=xx"
+        normalized = "https://pan.quark.cn/s/abcShare01"
+        qas = RecordingQas(
+            shares={
+                normalized: {
+                    "share": {
+                        "title": "直链分享",
+                        "file_only_num": 1,
+                        "video_total": 1,
+                        "size": 2_000,
+                    },
+                    "list": [
+                        {
+                            "file_name": "Show.S01E01.1080p.mkv",
+                            "size": 2_000,
+                            "dir": False,
+                        }
+                    ],
+                }
+            }
+        )
+        pansou = RecordingPanSou([{"taskname": "should-not-run", "shareurl": normalized}])
+        catalog = FakeCatalog({"found": False, "queryTitle": url, "matches": []})
+
+        result = MediaService(catalog, qas, self.store, pansou).search(url, "drama")
+
+        self.assertEqual(result["nextAction"], "tree")
+        self.assertTrue(result["data"]["shareImported"])
+        self.assertEqual(result["data"]["candidateCount"], 1)
+        self.assertEqual(
+            result["data"]["remoteCandidates"][0]["discoverySources"],
+            ["share_url"],
+        )
+        self.assertEqual(pansou.reads, [])
+        self.assertEqual(catalog.calls, [])
+        self.assertTrue(result["data"]["candidateId"])
+
+    def test_tree_accepts_quark_share_url(self):
+        url = "https://pan.quark.cn/s/treeShare99"
+        qas = RecordingQas(
+            shares={
+                url: {
+                    "share": {"title": "树分享", "video_total": 1},
+                    "list": [
+                        {
+                            "file_name": "Season 1",
+                            "dir": True,
+                            "include_items": 1,
+                            "fid": "d1",
+                        },
+                        {
+                            "file_name": "Episode.01.mkv",
+                            "size": 100,
+                            "dir": False,
+                            "fid": "f1",
+                        },
+                    ],
+                }
+            }
+        )
+
+        result = MediaService(
+            FakeCatalog({"found": False}),
+            qas,
+            self.store,
+            RecordingPanSou([]),
+        ).tree(url)
+
+        self.assertEqual(result["nextAction"], "choose_tree_nodes")
+        self.assertEqual(result["data"]["title"], "树分享")
+        self.assertGreaterEqual(result["data"]["stats"]["files"], 1)
+        self.assertTrue(result["data"]["candidateId"].startswith("cand-") or result["data"]["candidateId"])
+
+    def test_open_share_rejects_invalid_url(self):
+        from qas_client import ClientError
+
+        service = MediaService(
+            FakeCatalog({"found": False}),
+            RecordingQas(),
+            self.store,
+            RecordingPanSou([]),
+        )
+        with self.assertRaisesRegex(ClientError, "invalid quark share url"):
+            service.open_share("https://example.com/not-quark")
+
 
 if __name__ == "__main__":
     unittest.main()

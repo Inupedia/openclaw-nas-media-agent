@@ -357,14 +357,39 @@ def parse_args(argv) -> argparse.Namespace:
         choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
     )
     search.add_argument("--update", action="store_true")
+    share = subparsers.add_parser("share")
+    share_sub = share.add_subparsers(dest="share_command", required=True)
+    share_open = share_sub.add_parser("open")
+    share_open.add_argument("url")
+    share_open.add_argument(
+        "--media-type",
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
+    )
     preview = subparsers.add_parser("preview")
-    preview.add_argument("candidate_id")
+    preview.add_argument(
+        "candidate_id",
+        help="candidateId or Quark share URL (https://pan.quark.cn/s/...)",
+    )
+    preview.add_argument(
+        "--media-type",
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
+    )
     tree = subparsers.add_parser("tree")
-    tree.add_argument("candidate_id")
+    tree.add_argument(
+        "candidate_id",
+        help="candidateId or Quark share URL (https://pan.quark.cn/s/...)",
+    )
+    tree.add_argument(
+        "--media-type",
+        choices=("movie", "drama", "tv", "anime", "documentary", "show", "other"),
+    )
     plan = subparsers.add_parser("plan")
     plan_sub = plan.add_subparsers(dest="plan_command", required=True)
     plan_download = plan_sub.add_parser("download")
-    plan_download.add_argument("candidate_id")
+    plan_download.add_argument(
+        "candidate_id",
+        help="candidateId or Quark share URL (https://pan.quark.cn/s/...)",
+    )
     plan_download.add_argument(
         "--node",
         action="append",
@@ -540,14 +565,29 @@ def main(
                 getattr(args, "media_type", None),
                 update=getattr(args, "update", False),
             )
+        elif args.command == "share":
+            result = service.open_share(
+                args.url,
+                getattr(args, "media_type", None),
+            )
         elif args.command == "preview":
-            result = service.preview(args.candidate_id)
+            result = service.preview(
+                args.candidate_id,
+                getattr(args, "media_type", None),
+            )
         elif args.command == "tree":
-            result = service.tree(args.candidate_id)
+            result = service.tree(
+                args.candidate_id,
+                getattr(args, "media_type", None),
+            )
         elif args.command == "plan":
+            candidate_id = service.resolve_candidate_ref(
+                args.candidate_id,
+                getattr(args, "media_type", None),
+            )
             result = success(
                 planner.plan_selected(
-                    args.candidate_id,
+                    candidate_id,
                     node_ids=list(getattr(args, "nodes", []) or []),
                     preferred_media_type=getattr(args, "media_type", None),
                 ),
