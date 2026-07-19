@@ -1,13 +1,7 @@
-#!/usr/bin/env python3
-import sys
-from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from resource_agent import main
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+#!/bin/sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  exec "$ROOT/.venv/bin/python" "$ROOT/scripts/resource_agent.py" "$@"
+fi
+exec python3 "$ROOT/scripts/resource_agent.py" "$@"

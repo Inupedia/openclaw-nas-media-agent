@@ -38,6 +38,14 @@ cd /volume4/openclaw/skills
 git clone https://github.com/Inupedia/openclaw-nas-media-agent.git resource-download-agent
 chmod 0755 resource-download-agent/bin/mediactl
 mkdir -p /volume4/openclaw/data/resource-download-agent
+
+# 教父.com 发现依赖 Playwright（可选）。在技能目录创建持久 venv：
+cd /volume4/openclaw/skills/resource-download-agent
+python3 -m venv .venv
+.venv/bin/pip install "playwright>=1.40"
+.venv/bin/playwright install chromium
+.venv/bin/playwright install-deps chromium   # 容器内需要系统库时
+# 并把登录态放到 data/jiaofu_storage_state.json，配置 JIAOFU_STORAGE_STATE
 ```
 
 如果容器内的 OpenClaw workspace 是 `/root/.openclaw/workspace`，最终命令路径应为：

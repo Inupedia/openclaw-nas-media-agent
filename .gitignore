@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 .worktrees/
 .deploy_tmp/
+.venv/
 .env
 .env.*
 **/storageState.json

@@ -41,13 +41,13 @@ class DummyService:
 class MediaCtlContractTests(unittest.TestCase):
     def test_executable_exists_at_fixed_repository_path(self):
         executable = ROOT / "bin" / "mediactl"
+        text = executable.read_text(encoding="utf-8")
 
         self.assertTrue(executable.is_file())
         self.assertTrue(
-            executable.read_text(encoding="utf-8").startswith(
-                "#!/usr/bin/env python3"
-            )
+            text.startswith("#!/bin/sh") or text.startswith("#!/usr/bin/env python3")
         )
+        self.assertIn("resource_agent.py", text)
 
     def test_parser_supports_local_first_search(self):
         args = parse_args(
