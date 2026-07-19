@@ -5,6 +5,13 @@
 - 唯一入口：`{baseDir}/bin/mediactl`
 - 禁止：任意 shell、`python3` 直调、`curl`、临时脚本、管道拼接
 - `mediactl` 不可执行时：只报告错误，不要自行 `chmod`
+- 命令副作用与确认要求以 `{baseDir}/config/commands.yaml` 为准（CLI 强制执行）
+
+## Skill 加载与依赖门控
+
+- Skill **不得**因缺少 `QAS_*` / `ARIA2_*` 而无法加载；保护库拒绝规则必须始终可用。
+- 各命令在运行时按 `commands.yaml` 的 `requires_services` / `requires_env` 检查依赖。
+- 本地 `library lookup`、保护库拒绝不依赖 QAS。
 
 ## 副作用级别
 

@@ -8,6 +8,12 @@ import sys
 from pathlib import Path
 
 from aria2_client import Aria2Client
+from command_contract import (
+    ContractError,
+    enforce_invocation,
+    load_command_contract,
+    required_services,
+)
 from library_catalog import LibraryCatalog
 from media_service import MediaService
 from organizer import DownloadValidator, OrganizeError, Organizer
@@ -859,7 +865,7 @@ class ResourceAgent:
                 pass
 
 
-def _load_runtime(command: str | None = None):
+def _load_runtime(command: str | None = None, *, contract_key: str | None = None):
     base_dir = Path(__file__).resolve().parents[1]
     with open(
         base_dir / "config" / "routing.json",
@@ -867,9 +873,13 @@ def _load_runtime(command: str | None = None):
     ) as routing_file:
         routing = json.load(routing_file)
 
-    needs_qas = command in {
-        None,
-        "check-ready",
+    services: set[str]
+    if contract_key:
+        services = required_services(contract_key)
+    elif command in {None, "check-ready"}:
+        # Legacy callers without a contract key (unit helpers / check-ready).
+        services = {"aria2"} if command == "check-ready" else {"qas", "aria2"}
+    elif command in {
         "search",
         "share",
         "import-url",
@@ -877,16 +887,17 @@ def _load_runtime(command: str | None = None):
         "tree",
         "plan",
         "execute",
-    }
-    needs_aria = command in {None, "check-ready", "downloads", "execute"}
+    }:
+        services = {"qas", "aria2"} if command == "execute" else {"qas"}
+    elif command == "downloads":
+        services = {"aria2"}
+    else:
+        services = set()
+
+    needs_qas = "qas" in services
+    needs_aria = "aria2" in services
     # PanSou is optional supplemental discovery; never hard-required.
     needs_pansou = command in {None, "search"}
-    # downloads recover plan/execute needs QAS cookie when present.
-    optional_qas_for_downloads = (
-        command == "downloads"
-        and bool(os.environ.get("QAS_BASE_URL"))
-        and bool(os.environ.get("QAS_TOKEN"))
-    )
 
     required = []
     if needs_qas:
@@ -908,7 +919,7 @@ def _load_runtime(command: str | None = None):
     aria = None
     pansou = None
     planner = None
-    if needs_qas or optional_qas_for_downloads:
+    if needs_qas:
         qas = QasClient(os.environ["QAS_BASE_URL"], os.environ["QAS_TOKEN"])
     if needs_aria:
         aria = Aria2Client(
@@ -1169,10 +1180,14 @@ def main(
     store = None
     try:
         args = parse_args(arguments)
+        contract_key = enforce_invocation(args)
         try:
-            loaded = runtime_loader(args.command)
+            loaded = runtime_loader(args.command, contract_key=contract_key)
         except TypeError:
-            loaded = runtime_loader()
+            try:
+                loaded = runtime_loader(args.command)
+            except TypeError:
+                loaded = runtime_loader()
         routing, store, qas, aria, planner, pansou, jiaofu = loaded
         agent = ResourceAgent(store=store, qas=qas, aria=aria, routing=routing)
         service = None
@@ -1339,6 +1354,7 @@ def main(
         )
     except (
         AgentError,
+        ContractError,
         ClientError,
         OrganizeError,
         PlanningError,

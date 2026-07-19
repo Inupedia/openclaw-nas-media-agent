@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1
+
+### Behavior / contract
+
+- Skill no longer uses OpenClaw `requires.env` for QAS; protected-library refusal loads without QAS.
+- Runtime dependencies come from `config/commands.yaml` (`requires_services` / `requires_env` / `confirmation`).
+- CLI enforces `--confirmed` and Quark recovery env gates via the same contract file.
+- `check-ready` no longer requires QAS (aria2 only).
+- `library lookup` / `organize` remain usable without QAS credentials.
+
+### Docs / tests
+
+- Skill version `0.4.1`; safety docs describe load-vs-runtime dependency split.
+- Contract parser + enforcement tests; skill contract asserts absent Skill-level `requires.env`.
+
 ## 0.4.0
 
 ### Behavior

@@ -1,65 +1,91 @@
-# Machine-readable command contract (source of truth for docs/tests).
+# Machine-readable command contract (source of truth for CLI / Skill / tests).
 # Levels: L0 read | L1 local state | L2 remote query | L3 download | L4 library mutate
+# requires_services: qas | aria2 | pansou(optional elsewhere)
 
-version: "0.4.0"
+version: "0.4.1"
 
 commands:
+  check-ready:
+    effect: L0
+    confirmation: none
+    requires_services: [aria2]
   library.lookup:
     effect: L0
     confirmation: none
+    requires_services: []
   search:
     effect: L1
     confirmation: none
+    requires_services: [qas]
+  share.open:
+    effect: L1
+    confirmation: none
+    requires_services: [qas]
   preview:
     effect: L1
     confirmation: none
+    requires_services: [qas]
   tree:
     effect: L1
     confirmation: none
+    requires_services: [qas]
   import-url:
     effect: L1
     confirmation: none
+    requires_services: [qas]
   plan.download:
     effect: L1
     confirmation: none
+    requires_services: [qas]
   execute:
     effect: L3
     confirmation: required
+    requires_services: [qas, aria2]
   downloads.list:
     effect: L0
     confirmation: none
+    requires_services: [aria2]
     side_effects: sync_aria2_status_only
   downloads.show:
     effect: L0
     confirmation: none
+    requires_services: [aria2]
     side_effects: sync_aria2_status_only
   downloads.pause:
     effect: L3
     confirmation: none
+    requires_services: [aria2]
   downloads.resume:
     effect: L3
     confirmation: none
+    requires_services: [aria2]
   downloads.cancel:
     effect: L3
     confirmation: none
+    requires_services: [aria2]
   downloads.validate:
     effect: L3
     confirmation: none
+    requires_services: [aria2]
   downloads.recover.plan:
     effect: L1
     confirmation: none
+    requires_services: [qas, aria2]
     requires_env: [QUARK_RECOVERY_ENABLED]
     allowed_states: [error, partial_failed]
     allowed_error_codes: ["16"]
   downloads.recover.execute:
     effect: L3
     confirmation: required
+    requires_services: [qas, aria2]
     requires_env: [QUARK_RECOVERY_ENABLED]
     allowed_states: [error, partial_failed]
     allowed_error_codes: ["16"]
   organize.plan:
     effect: L1
     confirmation: none
+    requires_services: []
   organize.execute:
     effect: L4
     confirmation: required
+    requires_services: []

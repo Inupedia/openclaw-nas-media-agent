@@ -106,20 +106,22 @@ class SkillContractTests(unittest.TestCase):
             "ARIA2_RPC_URL",
             "ARIA2_RPC_SECRET",
             "RESOURCE_AGENT_STATE_DB",
+            "QUARK_RECOVERY_ENABLED",
         ):
             self.assertIn(variable, self.frontmatter)
-        # Optional discovery/download deps must not gate skill loading.
-        requires_env = re.search(
-            r"requires:\s*\n(?:[ \t]+.+\n)*?[ \t]+env:\s*\n((?:[ \t]+- .+\n)+)",
+        # Skill must load without QAS so protected-library refusal still works.
+        self.assertNotIn("primaryEnv:", self.frontmatter)
+        # No Skill-level requires.env block (only requires.bins).
+        requires_block = re.search(
+            r"requires:\n((?:[ \t]+.+\n)+)",
             self.frontmatter,
         )
-        self.assertIsNotNone(requires_env)
-        required = requires_env.group(1)
-        self.assertIn("QAS_BASE_URL", required)
-        self.assertIn("QAS_TOKEN", required)
-        self.assertNotIn("PANSOU_BASE_URL", required)
-        self.assertNotIn("ARIA2_RPC_URL", required)
-        self.assertNotIn("RESOURCE_AGENT_STATE_DB", required)
+        self.assertIsNotNone(requires_block)
+        requires_text = requires_block.group(1)
+        self.assertIn("bins:", requires_text)
+        self.assertNotIn("\n    env:\n", "\n" + requires_text)
+        self.assertNotRegex(requires_text, r"(?m)^[ \t]+env:")
+        self.assertIn("required: false", self.frontmatter)
 
     def test_skill_requires_terminal_stop_and_nas_first_output(self):
         self.assertIn("terminal", self.content)
@@ -147,7 +149,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("execute PLAN_ID --confirmed", self.content)
 
     def test_skill_recover_requires_confirmation_and_forbids_list_side_effects(self):
-        self.assertIn("version: 0.4.0", self.frontmatter)
+        self.assertIn("version: 0.4.1", self.frontmatter)
         self.assertIn("confirm_recover", self.content)
         self.assertIn("downloads recover plan", self.bundle)
         self.assertIn("downloads recover execute PLAN_ID --confirmed", self.bundle)
