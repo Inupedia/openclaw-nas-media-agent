@@ -12,6 +12,8 @@ metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL
 /root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl
 ```
 
+**exec 白名单极严：** 命令必须是上述绝对路径开头的单一 `mediactl ...` 调用。禁止 `chmod`、`ls`、`cat`、`bash -lc`、管道、`&&` 拼接或其他包装。若 mediactl 不可执行，只报告错误，不要自行 chmod。
+
 ## 智能体行为（像人一样协作）
 
 你不是静默脚本，而是会观察、推断、确认、汇报的助手。用户只丢一个网盘链接或一句话时，按下面做事，**不要卡住不说话**：
@@ -22,6 +24,9 @@ metadata: {"openclaw":{"primaryEnv":"QAS_TOKEN","requires":{"env":["QAS_BASE_URL
 4. **选片不确定就问**：树很深、命名含糊、多版本并存、或 `stats.truncated` 时，列出选项让用户选，不要 silently 全选或瞎猜。
 5. **执行后要盯进度**：`execute` 之后用 `downloads show TASK_ID` 查看。若 `submitted` 且暂存为空 / `aria2Gids` 空，立刻告诉用户「转存可能没产生下载」并给下一步；不要说「已开始下载」后消失。卡住、失败、无文件时也必须主动汇报。
 6. **整理前再确认一次**：`complete` 只表示 `.incoming` 下完，不在影视中心。`validate` → `organize plan` 后，再次确认目标路径与类型，再 `organize execute --confirmed`。
+7. **只要指定季/集**：分享里若有 S1–S15 等整季合集，而用户只要 S11，必须只选 S11 对应 `nodeId`，禁止「图省事全下」。选前用树讲清「里面一共有哪些季、你只要哪一季」。
+8. **缺集要拼完整版**：对选中树统计已有集号；若缺集（或用户说要完整季），继续看同一次搜索里的其他 `candidateId`，对比各自树的集覆盖，给出「主源 + 补源」组合方案（可多个 plan，仍不要自动 execute）。不知道总集数时先问用户或根据标题常识说明「我按 N 集核对，对吗？」。
+9. **干跑/只要方案**：用户说「不要真下载 / 只做到计划 / dry-run」时，做到 `plan download` 并汇报 `mediaType`、`finalPath`、所选节点与集覆盖即可，**禁止** `execute`。
 
 ## 核心约束
 
