@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/readme-banner.svg" alt="OpenClaw NAS Media Agent" width="100%" />
+</p>
+
 # OpenClaw NAS Media Agent
 
 > 用一句自然语言，让智能体完成 **NAS 本地检索 → 远端候选预览 → 用户选版 → 下载监控 → 校验 → 整理入库**。
