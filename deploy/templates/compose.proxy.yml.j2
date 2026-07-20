@@ -1,0 +1,19 @@
+services:
+  proxy:
+    image: {{ image | yaml_quote }}
+    container_name: openclaw-media-proxy
+    restart: unless-stopped
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+    volumes:
+      - type: bind
+        source: {{ config_path | yaml_quote }}
+        target: /etc/sing-box/config.json
+        read_only: true
+    networks:
+      - media
+    # Intentionally no host port publication. SOCKS5 is reachable only on Docker DNS.
+
+networks:
+  media:
+    external: true
+    name: openclaw-media
