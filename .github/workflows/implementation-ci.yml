@@ -69,6 +69,9 @@ jobs:
 
   apply-task15-patch:
     if: github.event_name == 'pull_request'
+    concurrency:
+      group: existing-openclaw-task15-patch
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -93,21 +96,6 @@ jobs:
           git apply /tmp/task15.patch
           rm "${parts[@]}"
           echo "applied=true" >> "$GITHUB_OUTPUT"
-      - name: Restore read-only verification workflow
-        if: steps.patch.outputs.applied == 'true'
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('.github/workflows/implementation-ci.yml')
-          text = path.read_text(encoding='utf-8')
-          marker = '\n  apply-task15-patch:\n'
-          if marker not in text:
-              raise SystemExit('temporary job marker missing')
-          baseline = text.split(marker, 1)[0]
-          baseline = baseline.replace('permissions:\n  contents: write', 'permissions:\n  contents: read')
-          path.write_text(baseline.rstrip() + '\n', encoding='utf-8')
-          PY
       - name: Install locked dependencies
         if: steps.patch.outputs.applied == 'true'
         run: python3 -m pip install --require-hashes -r deploy/requirements.lock
@@ -146,11 +134,13 @@ jobs:
           path: /tmp/task15-verify.log
           if-no-files-found: error
           retention-days: 3
-      - name: Commit verified task 15
+      - name: Commit verified task 15 business files
         if: steps.patch.outputs.applied == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+          git reset .github/workflows/implementation-ci.yml
           git commit -m "docs(deploy): publish deterministic existing OpenClaw workflow"
+          git pull --rebase origin feat/existing-openclaw-deployer
           git push origin HEAD:feat/existing-openclaw-deployer
