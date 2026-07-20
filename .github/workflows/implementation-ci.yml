@@ -51,10 +51,26 @@ jobs:
         with:
           python-version: "3.10"
       - name: Generate hash-locked requirements
+        shell: bash
         run: |
-          python3 -m pip install pip-tools==7.6.0
-          pip-compile --generate-hashes --output-file /tmp/requirements.lock deploy/requirements.in
+          set +e
+          {
+            python3 -m pip install pip-tools==7.6.0
+            pip-compile --generate-hashes --output-file /tmp/requirements.lock deploy/requirements.in
+          } > /tmp/requirements-lock.log 2>&1
+          status=$?
+          tail -n 80 /tmp/requirements-lock.log
+          exit "$status"
+      - name: Upload lock generation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-lock-log
+          path: /tmp/requirements-lock.log
+          if-no-files-found: error
+          retention-days: 3
       - name: Upload requirements lock
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: deployment-requirements-lock
