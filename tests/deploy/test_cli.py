@@ -82,13 +82,13 @@ class ParserTests(unittest.TestCase):
 
     def test_unimplemented_command_returns_structured_manual_action(self):
         stream = io.StringIO()
-        code = main(["discover"], stream=stream)
+        code = main(["init"], stream=stream)
         payload = json.loads(stream.getvalue())
         self.assertEqual(code, 2)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "manual_action_required")
         self.assertEqual(payload["nextAction"], "implementation_pending")
-        self.assertEqual(payload["data"]["command"], "discover")
+        self.assertEqual(payload["data"]["command"], "init")
 
     def test_invalid_arguments_return_json_without_traceback(self):
         stream = io.StringIO()
