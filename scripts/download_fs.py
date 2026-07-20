@@ -1,14 +1,17 @@
-"""Keep download staging directories writable by aria2 (nobody) within managed roots."""
+"""Create and probe the Agent's managed download directories safely."""
 
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
-# aria2-pro runs aria2c as nobody:nogroup. Only downloads root + .incoming
-# need world-writable. .ready / .quarantine are Agent-owned trust boundaries.
-ARIA2_DIR_MODE = 0o777
+DEFAULT_INCOMING_MODE = 0o770
+# Backward-compatible exported name. The effective mode is read from
+# RESOURCE_AGENT_INCOMING_MODE for each operation.
+ARIA2_DIR_MODE = DEFAULT_INCOMING_MODE
 AGENT_DIR_MODE = 0o750
+_ALLOWED_INCOMING_MODES = {0o750, 0o770, 0o777}
 
 
 class DownloadFsError(RuntimeError):
@@ -17,6 +20,31 @@ class DownloadFsError(RuntimeError):
 
 def _resolve(path: Path | str) -> Path:
     return Path(path).expanduser()
+
+
+def incoming_mode() -> int:
+    """Return the deployer-selected managed incoming mode.
+
+    0750 is used when OpenClaw and aria2 share a UID, 0770 for a shared group
+    or ACL-backed deployment, and 0777 only for the explicitly discovered
+    fallback. Unknown values fail closed instead of silently widening access.
+    """
+
+    raw = os.environ.get("RESOURCE_AGENT_INCOMING_MODE")
+    if raw is None:
+        return DEFAULT_INCOMING_MODE
+    text = str(raw).strip()
+    if not text:
+        raise DownloadFsError("RESOURCE_AGENT_INCOMING_MODE is empty")
+    try:
+        mode = int(text, 8)
+    except ValueError as error:
+        raise DownloadFsError("RESOURCE_AGENT_INCOMING_MODE must be octal") from error
+    if mode not in _ALLOWED_INCOMING_MODES:
+        raise DownloadFsError(
+            "RESOURCE_AGENT_INCOMING_MODE must be one of 0750, 0770, or 0777"
+        )
+    return mode
 
 
 def assert_under_downloads_root(path: Path | str, downloads_root: Path | str) -> Path:
@@ -31,17 +59,39 @@ def assert_under_downloads_root(path: Path | str, downloads_root: Path | str) ->
     return target
 
 
-def _is_aria2_zone(path: Path, downloads_root: Path) -> bool:
+def _relative_zone(path: Path, downloads_root: Path) -> str:
     try:
-        rel = path.resolve().relative_to(downloads_root.resolve())
+        relative = path.resolve().relative_to(downloads_root.resolve())
     except ValueError:
-        return False
-    parts = rel.parts
-    if not parts:
-        return True  # downloads root itself
-    if parts[0] == ".incoming":
-        return True
+        return "outside"
+    if not relative.parts:
+        return "downloads_root"
+    if relative.parts[0] == ".incoming":
+        return "incoming"
+    if relative.parts[0] == ".ready":
+        return "ready"
+    if relative.parts[0] == ".quarantine":
+        return "quarantine"
+    return "other"
+
+
+def _has_named_ancestor(path: Path, names: set[str], *, depth: int = 12) -> bool:
+    current = path
+    for _ in range(depth):
+        if current.name in names:
+            return True
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
     return False
+
+
+def _chmod(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
 
 
 def ensure_aria2_writable(
@@ -49,7 +99,13 @@ def ensure_aria2_writable(
     *,
     downloads_root: Path | str | None = None,
 ) -> Path:
-    """Create path; chmod 0777 only for downloads root / .incoming trees."""
+    """Create a managed directory and apply the deployer-selected mode.
+
+    This function never decides that 0777 is required. The deployment planner
+    makes that decision from the actual aria2 identity and exposes it through
+    RESOURCE_AGENT_INCOMING_MODE.
+    """
+
     target = _resolve(path)
     root = _resolve(downloads_root) if downloads_root is not None else None
     if root is not None:
@@ -59,51 +115,50 @@ def ensure_aria2_writable(
     except OSError:
         return target
 
-    if root is None:
-        # Legacy callers without root: only chmod leaf if name suggests incoming/task.
-        name = target.name
-        if name in {".ready", ".quarantine"}:
-            try:
-                os.chmod(target, AGENT_DIR_MODE)
-            except OSError:
-                pass
+    selected_incoming_mode = incoming_mode()
+    if root is not None:
+        zone = _relative_zone(target, root)
+        if zone in {"downloads_root", "incoming"}:
+            current = target
+            for _ in range(12):
+                resolved = current.resolve()
+                current_zone = _relative_zone(resolved, root)
+                if current_zone not in {"downloads_root", "incoming"}:
+                    break
+                _chmod(resolved, selected_incoming_mode)
+                if resolved == root.resolve():
+                    break
+                parent = current.parent
+                if parent == current:
+                    break
+                current = parent
             return target
-        try:
-            os.chmod(target, ARIA2_DIR_MODE)
-        except OSError:
-            pass
-        parent = target.parent
-        if parent.name == ".incoming" or parent.name == "downloads":
-            try:
-                os.chmod(parent, ARIA2_DIR_MODE)
-            except OSError:
-                pass
+        if zone in {"ready", "quarantine"}:
+            _chmod(target, AGENT_DIR_MODE)
+            return target
+        # A caller with an explicit root must not use this helper for arbitrary
+        # children outside the managed lanes.
+        raise DownloadFsError(f"refusing chmod outside managed download lanes: {target}")
+
+    if _has_named_ancestor(target, {".ready", ".quarantine"}):
+        _chmod(target, AGENT_DIR_MODE)
+        return target
+    if _has_named_ancestor(target, {".incoming"}):
+        _chmod(target, selected_incoming_mode)
+        current = target.parent
+        for _ in range(12):
+            if current.name == ".incoming":
+                _chmod(current, selected_incoming_mode)
+                break
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
         return target
 
-    current = target
-    for _ in range(12):
-        try:
-            resolved = current.resolve()
-        except OSError:
-            break
-        if not _is_aria2_zone(resolved, root):
-            # Still ensure Agent zones exist with tighter mode when we walk into them.
-            if resolved.name in {".ready", ".quarantine"}:
-                try:
-                    os.chmod(resolved, AGENT_DIR_MODE)
-                except OSError:
-                    pass
-            break
-        try:
-            os.chmod(resolved, ARIA2_DIR_MODE)
-        except OSError:
-            pass
-        if resolved == root.resolve():
-            break
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
+    # Legacy callers may pass a top-level staging path whose name does not carry
+    # lane information. Keep it private to the Agent rather than widening it.
+    _chmod(target, AGENT_DIR_MODE)
     return target
 
 
@@ -129,7 +184,42 @@ def ensure_managed_download_roots(downloads_root: Path | str) -> list[Path]:
     return [root, incoming, ready, quarantine]
 
 
+def probe_writable(path: Path | str) -> bool:
+    """Test effective write access with an exclusive zero-byte probe."""
+
+    target = _resolve(path)
+    if not target.is_dir():
+        return False
+    probe = target / (
+        f".openclaw-write-probe-{os.getpid()}-{secrets.token_hex(8)}"
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            probe,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        os.close(descriptor)
+        descriptor = None
+        probe.unlink()
+        return True
+    except OSError:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def is_world_writable(path: Path | str) -> bool:
+    """Compatibility helper; readiness no longer relies on this property."""
+
     try:
         mode = _resolve(path).stat().st_mode
     except OSError:
