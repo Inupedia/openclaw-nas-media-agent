@@ -1,0 +1,35 @@
+[
+  {
+    "Id": "sha256:111111111111",
+    "Name": "/openclaw-gateway",
+    "Config": {
+      "Image": "ghcr.io/openclaw/openclaw:1.0.0",
+      "Labels": {
+        "com.docker.compose.project": "openclaw",
+        "com.docker.compose.service": "gateway",
+        "com.docker.compose.project.working_dir": "/volume1/docker/openclaw",
+        "com.docker.compose.project.config_files": "/volume1/docker/openclaw/compose.yml"
+      }
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/volume1/openclaw",
+        "Destination": "/root/.openclaw/workspace",
+        "Mode": "rw",
+        "RW": true
+      }
+    ],
+    "NetworkSettings": {
+      "Networks": {
+        "openclaw_default": {}
+      }
+    },
+    "State": {
+      "Status": "running",
+      "Health": {
+        "Status": "healthy"
+      }
+    }
+  }
+]
