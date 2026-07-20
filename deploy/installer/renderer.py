@@ -11,7 +11,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError, TemplateNotFound, UndefinedError
+from jinja2 import (
+    Environment,
+    FileSystemLoader,
+    StrictUndefined,
+    TemplateError,
+    TemplateNotFound,
+    UndefinedError,
+)
 
 from .command import CommandRunner
 from .config import DeploymentConfig
@@ -137,7 +144,9 @@ def render_template(
     """Render one known template with StrictUndefined and atomic output."""
 
     template_name = str(name)
-    selected_mode = (0o644 if template_name.startswith("compose.") else 0o600) if mode is None else int(mode)
+    selected_mode = (
+        0o644 if template_name.startswith("compose.") else 0o600
+    ) if mode is None else int(mode)
     try:
         template = _environment().get_template(template_name)
         content = template.render(dict(context))
@@ -188,7 +197,9 @@ def build_compose_context(
         "ports": {
             "qas": f"127.0.0.1:${{QAS_PORT:-{config.qas.port}}}:5005",
             "pansou": f"127.0.0.1:${{PANSOU_PORT:-{config.pansou.port}}}:8888",
-            "aria2_rpc": f"127.0.0.1:${{ARIA2_RPC_PORT:-{config.aria2.rpc_port}}}:6800",
+            "aria2_rpc": (
+                f"127.0.0.1:${{ARIA2_RPC_PORT:-{config.aria2.rpc_port}}}:6800"
+            ),
         },
         "qas": {
             "username": config.qas.username,
@@ -198,8 +209,16 @@ def build_compose_context(
             "plugins": ",".join(config.pansou.plugins),
         },
         "aria2": {
-            "puid": str(config.aria2.uid) if config.aria2.uid is not None else "${PUID:-1000}",
-            "pgid": str(config.aria2.gid) if config.aria2.gid is not None else "${PGID:-1000}",
+            "puid": (
+                str(config.aria2.uid)
+                if config.aria2.uid is not None
+                else "${PUID:-1000}"
+            ),
+            "pgid": (
+                str(config.aria2.gid)
+                if config.aria2.gid is not None
+                else "${PGID:-1000}"
+            ),
         },
         "secret_refs": {
             "qas_webui_password": "${QAS_WEBUI_PASSWORD:?loaded by deployer}",
@@ -237,8 +256,14 @@ def _protected_roots(config: DeploymentConfig) -> list[str]:
         candidates.append(candidate)
 
     minimal: list[Path] = []
-    for candidate in sorted(set(candidates), key=lambda item: (len(item.parts), str(item))):
-        if any(candidate == parent or _is_under(candidate, parent) for parent in minimal):
+    for candidate in sorted(
+        set(candidates),
+        key=lambda item: (len(item.parts), str(item)),
+    ):
+        if any(
+            candidate == parent or _is_under(candidate, parent)
+            for parent in minimal
+        ):
             continue
         minimal.append(candidate)
     return [str(path) for path in sorted(minimal, key=str)]
@@ -283,7 +308,17 @@ def build_routing(config: DeploymentConfig) -> dict[str, object]:
 def validate_compose(path: Path, runner: CommandRunner) -> None:
     target = Path(path)
     result = runner.run(
-        ["docker", "compose", "-f", str(target), "config", "--quiet"],
+        [
+            "env",
+            "QAS_WEBUI_PASSWORD=__OPENCLAW_VALIDATION_ONLY__",
+            "ARIA2_RPC_SECRET=__OPENCLAW_VALIDATION_ONLY__",
+            "docker",
+            "compose",
+            "-f",
+            str(target),
+            "config",
+            "--quiet",
+        ],
         timeout=60,
     )
     if result.returncode != 0:
