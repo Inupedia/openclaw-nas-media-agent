@@ -69,7 +69,7 @@ jobs:
           retention-days: 1
 
   apply-task15-patch:
-    if: github.event_name == 'push'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
