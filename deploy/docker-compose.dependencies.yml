@@ -1,0 +1,98 @@
+# Reference dependency stack for openclaw-nas-media-agent.
+#
+# This file is intentionally separate from OpenClaw. Reuse existing QAS,
+# PanSou, or aria2 containers whenever possible. Review every host path,
+# port, credential, image tag, and UID/GID before starting it on a NAS.
+#
+# QAS still needs its own Quark account configuration, API token, and aria2
+# plugin/RPC settings in the QAS WebUI. This Compose file does not configure
+# account cookies or grant permission to download third-party copyrighted work.
+
+name: openclaw-media-dependencies
+
+services:
+  qas:
+    image: cp0204/quark-auto-save:latest
+    container_name: openclaw-media-qas
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      WEBUI_USERNAME: ${QAS_WEBUI_USERNAME:?set QAS_WEBUI_USERNAME in .env}
+      WEBUI_PASSWORD: ${QAS_WEBUI_PASSWORD:?set QAS_WEBUI_PASSWORD in .env}
+    volumes:
+      - ${QAS_CONFIG_DIR:?set QAS_CONFIG_DIR in .env}:/app/config
+    ports:
+      # Localhost binding is safer. OpenClaw should access qas:5005
+      # through the shared Docker network.
+      - 127.0.0.1:${QAS_PORT:-5005}:5005
+    networks:
+      - media
+
+  pansou:
+    image: ghcr.io/fish2018/pansou:latest
+    container_name: openclaw-media-pansou
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      PORT: "8888"
+      CHANNELS: ${PANSOU_CHANNELS:-tgsearchers3}
+      ENABLED_PLUGINS: ${PANSOU_ENABLED_PLUGINS:-}
+      CACHE_PATH: /app/cache
+    volumes:
+      - ${PANSOU_CACHE_DIR:?set PANSOU_CACHE_DIR in .env}:/app/cache
+    ports:
+      - 127.0.0.1:${PANSOU_PORT:-8888}:8888
+    networks:
+      - media
+
+  aria2:
+    image: p3terx/aria2-pro:latest
+    container_name: openclaw-media-aria2
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      RPC_SECRET: ${ARIA2_RPC_SECRET:?set ARIA2_RPC_SECRET in .env}
+      RPC_PORT: "6800"
+      LISTEN_PORT: "6888"
+    volumes:
+      - ${ARIA2_CONFIG_DIR:?set ARIA2_CONFIG_DIR in .env}:/config
+      # The Skill submits task paths under /nas/downloads/.incoming/...
+      - ${DOWNLOADS_DIR:?set DOWNLOADS_DIR in .env}:/nas/downloads
+    ports:
+      # Keep RPC bound to localhost unless a different host must access it.
+      # OpenClaw on the shared network should use aria2:6800.
+      - 127.0.0.1:${ARIA2_RPC_PORT:-6800}:6800
+      - 6888:6888
+      - 6888:6888/udp
+    networks:
+      - media
+
+  ariang:
+    image: p3terx/ariang:latest
+    container_name: openclaw-media-ariang
+    restart: unless-stopped
+    profiles: ["ui"]
+    ports:
+      - 127.0.0.1:${ARIA2_WEB_PORT:-6880}:6880
+    networks:
+      - media
+    depends_on:
+      - aria2
+
+networks:
+  media:
+    name: ${MEDIA_NETWORK:-openclaw-media}
+
+# After OpenClaw joins the same Docker network, configure the Skill with:
+#
+# QAS_BASE_URL=http://qas:5005
+# QAS_TOKEN=<token created/configured in QAS>
+# PANSOU_BASE_URL=http://pansou:8888
+# ARIA2_RPC_URL=http://aria2:6800/jsonrpc
+# ARIA2_RPC_SECRET=<same value as .env>
+#
+# The OpenClaw container must mount the same ${DOWNLOADS_DIR} host directory.
+# Its path must match config/routing.json downloads.agent_root, while aria2
+# always sees that host directory at /nas/downloads.
