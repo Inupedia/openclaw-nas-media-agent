@@ -46,7 +46,6 @@ jobs:
           python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
 
   resolve-image-lock:
-    if: github.event_name == 'pull_request' && hashFiles('deploy/versions.yaml') == ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
