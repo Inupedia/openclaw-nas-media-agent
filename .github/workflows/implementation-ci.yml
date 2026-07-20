@@ -40,4 +40,4 @@ jobs:
       - name: Validate committed JSON
         run: |
           python3 -m json.tool config/routing.json >/dev/null
-          python3 -m json.tool config/command-contract.json >/dev/null
+          python3 -m json.tool config/commands.json >/dev/null
