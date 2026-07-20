@@ -16,7 +16,7 @@ from deploy.installer.planning import PlanFacts, build_plan, validate_plan
 from deploy.installer.secrets import SecretStore
 
 from .test_config import minimal_config
-from .test_discovery import FixtureRunner
+from .test_discovery import FixtureRunner, _VALIDATION_PREFIX
 
 
 def sample_change(
@@ -42,8 +42,8 @@ class InvalidComposeRunner(FixtureRunner):
     def run(self, args, timeout=30):
         key = tuple(args)
         if (
-            len(key) == 6
-            and key[:3] == ("docker", "compose", "-f")
+            len(key) == 9
+            and key[:6] == _VALIDATION_PREFIX
             and key[-2:] == ("config", "--quiet")
         ):
             self.calls.append(key)
