@@ -23,7 +23,6 @@ jobs:
       - name: Install locked deployment dependencies
         run: python3 -m pip install --require-hashes -r deploy/requirements.lock
       - name: Run existing test suite
-        id: tests
         shell: bash
         run: |
           set +e
@@ -114,17 +113,39 @@ jobs:
         run: python3 -m pip install --require-hashes -r deploy/requirements.lock
       - name: Verify task 15 patch
         if: steps.patch.outputs.applied == 'true'
+        shell: bash
         run: |
-          python3 -m unittest discover -s tests -v
-          python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
-          python3 -m json.tool config/routing.json >/dev/null
-          python3 - <<'PY'
+          set +e
+          {
+            python3 -m unittest discover -s tests -v
+            tests_status=$?
+            python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
+            json_status=$?
+            python3 -m json.tool config/routing.json >/dev/null
+            routing_status=$?
+            python3 - <<'PY'
           import yaml
           from pathlib import Path
           yaml.safe_load(Path('deploy/docker-compose.dependencies.yml').read_text(encoding='utf-8'))
           yaml.safe_load(Path('.github/workflows/deploy-tests.yml').read_text(encoding='utf-8'))
           PY
-          git diff --check
+            yaml_status=$?
+            git diff --check
+            diff_status=$?
+            echo "statuses tests=$tests_status json=$json_status routing=$routing_status yaml=$yaml_status diff=$diff_status"
+            exit $(( tests_status || json_status || routing_status || yaml_status || diff_status ))
+          } > /tmp/task15-verify.log 2>&1
+          status=$?
+          tail -n 160 /tmp/task15-verify.log
+          exit "$status"
+      - name: Upload task 15 verification log
+        if: always() && steps.patch.outputs.applied == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: task15-verify-log
+          path: /tmp/task15-verify.log
+          if-no-files-found: error
+          retention-days: 3
       - name: Commit verified task 15
         if: steps.patch.outputs.applied == 'true'
         run: |
