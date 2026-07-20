@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from collections.abc import Collection
 from pathlib import Path
@@ -13,6 +14,7 @@ from .errors import DeploymentError
 
 _SECRET_DIR_MODE = 0o700
 _SECRET_FILE_MODE = 0o600
+_SECRET_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _security_error(code: str, message: str, *, details=None) -> DeploymentError:
@@ -64,6 +66,7 @@ class SecretStore:
         value = str(name)
         if (
             not value
+            or not _SECRET_NAME.fullmatch(value)
             or "/" in value
             or "\\" in value
             or ".." in value
