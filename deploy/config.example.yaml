@@ -1,0 +1,63 @@
+schema_version: 1
+
+deployment:
+  mode: existing-openclaw
+  platform: auto
+  project_dir: /volume1/docker/openclaw-media
+  timezone: Asia/Shanghai
+  allow_reuse_existing_services: true
+
+nas:
+  downloads_dir: /volume2/downloads
+  organizing_dir: /volume3/media/.openclaw-organizing
+  libraries:
+    movie: /volume3/media/Movie
+    drama: /volume2/media/Drama
+    anime: /volume2/media/Anime
+    documentary: /volume2/media/Documentary
+    show: /volume2/media/Shows
+    other: /volume2/media/Others
+
+openclaw:
+  container_name: auto
+  workspace_host_dir: auto
+  config_host_path: auto
+
+qas:
+  mode: auto
+  port: 5005
+  username: admin
+  password_secret: qas_webui_password
+  api_token_secret: qas_token
+  quark_cookie_secret: quark_cookie
+
+aria2:
+  mode: auto
+  rpc_port: 6800
+  rpc_secret: aria2_rpc_secret
+  uid: auto
+  gid: auto
+
+pansou:
+  enabled: true
+  mode: auto
+  port: 8888
+  channels:
+    - tgsearchers3
+  plugins: []
+  max_candidates: 50
+  proxy:
+    mode: existing
+    url_secret: pansou_proxy_url
+
+jiaofu:
+  enabled: false
+  storage_state_secret: jiaofu_storage_state.json
+  max_candidates: 20
+
+verification:
+  safe: true
+  safe_query: OpenClaw deploy verification sample
+  allow_real_download: false
+  full_test_share_url_secret: full_test_share_url
+  max_test_bytes: 104857600
