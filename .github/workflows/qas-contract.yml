@@ -18,7 +18,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/qas-config /tmp/qas-inspect
+          rm -rf /tmp/qas-config /tmp/qas-inspect
+          mkdir -p /tmp/qas-config /tmp/qas-inspect/source
           chmod 700 /tmp/qas-config /tmp/qas-inspect
           docker run -d \
             --name qas-inspect \
@@ -29,43 +30,68 @@ jobs:
             -v /tmp/qas-config:/app/config \
             cp0204/quark-auto-save@sha256:4d97439c0cd095c5fb8ef7133ca4726c8a3f996fa319f8c049180270b61c29be
           for _ in $(seq 1 60); do
-            test -f /tmp/qas-config/config/quark_config.json && break
+            if python3 - <<'PY'
+          import urllib.request
+          try:
+              with urllib.request.urlopen('http://127.0.0.1:15005/', timeout=1) as response:
+                  response.read(1)
+              raise SystemExit(0)
+          except Exception:
+              raise SystemExit(1)
+          PY
+            then
+              break
+            fi
             sleep 1
           done
-      - name: Capture source structure and aria2 references
-        shell: bash
-        run: |
-          set +e
-          docker exec qas-inspect sh -lc 'find /app -maxdepth 5 -type f -print | sort' \
-            > /tmp/qas-inspect/app-files.txt 2>&1
-          docker exec qas-inspect sh -lc \
-            'grep -R -n -i -E "aria2|push_config|def data|/data|task_suggestions|get_share_detail" /app --include="*.py" --include="*.html" --include="*.json" 2>/dev/null | head -2000' \
-            > /tmp/qas-inspect/source-grep.txt 2>&1
-          docker exec qas-inspect sh -lc '
-            for file in $(grep -R -l -i "aria2" /app --include="*.py" 2>/dev/null | head -50); do
-              echo "===== ${file} ====="
-              sed -n "1,260p" "${file}"
-            done
-          ' > /tmp/qas-inspect/aria2-source.txt 2>&1
-          docker exec qas-inspect sh -lc '
-            for file in $(grep -R -l -E "task_suggestions|get_share_detail|def data|route.*data" /app --include="*.py" 2>/dev/null | head -50); do
-              echo "===== ${file} ====="
-              sed -n "1,340p" "${file}"
-            done
-          ' > /tmp/qas-inspect/api-source.txt 2>&1
-          set -e
-      - name: Configure dummy API token and capture authenticated response
+      - name: Capture exact source and filesystem contract
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          docker exec qas-inspect find /app -maxdepth 5 -type f -print | sort > /tmp/qas-inspect/app-files.txt
+          for source in \
+            /app/app/run.py \
+            /app/plugins/aria2.py \
+            /app/quark_auto_save.py \
+            /app/app/templates/login.html \
+            /app/app/templates/index.html \
+            /app/skills/quark-auto-save/scripts/qas_client.py
+          do
+            name="$(printf '%s' "$source" | sed 's#^/##; s#/#__#g')"
+            docker cp "qas-inspect:${source}" "/tmp/qas-inspect/source/${name}" || true
+          done
+          docker exec qas-inspect sh -lc '
+            python - <<"PY"
+          import json
+          import os
+          from pathlib import Path
+          candidates = [Path("/app/config/config/quark_config.json"), Path("/app/config/quark_config.json")]
+          rows = []
+          for path in candidates:
+              try:
+                  stat = path.stat()
+                  rows.append({"path": str(path), "exists": True, "mode": oct(stat.st_mode & 0o777), "uid": stat.st_uid, "gid": stat.st_gid, "size": stat.st_size})
+              except OSError as error:
+                  rows.append({"path": str(path), "exists": False, "errorType": type(error).__name__})
+          print(json.dumps(rows, ensure_ascii=False))
+          PY
+          ' > /tmp/qas-inspect/config-paths.json
+      - name: Configure dummy token inside container and probe API
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec qas-inspect python - <<'PY'
           import json
           from pathlib import Path
-          path = Path('/tmp/qas-config/config/quark_config.json')
+          candidates = [Path('/app/config/config/quark_config.json'), Path('/app/config/quark_config.json')]
+          path = next((item for item in candidates if item.is_file()), None)
+          if path is None:
+              raise SystemExit('QAS config file not found')
           data = json.loads(path.read_text(encoding='utf-8'))
           data['token'] = 'fixture-token'
           data['cookie'] = ['fixture-cookie']
           path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          print(path)
           PY
           docker restart qas-inspect >/dev/null
           for _ in $(seq 1 60); do
@@ -83,16 +109,14 @@ jobs:
             fi
             sleep 1
           done
-          cat > /tmp/capture_qas_api.py <<'PY'
+          python3 - <<'PY'
           from __future__ import annotations
           import base64
           import json
+          import urllib.error
           import urllib.parse
           import urllib.request
-          import urllib.error
           from pathlib import Path
-
-          output = Path('/tmp/qas-inspect')
 
           def sanitize(value, key=''):
               sensitive = any(term in key.casefold() for term in ('cookie', 'token', 'password', 'secret', 'authorization'))
@@ -101,9 +125,7 @@ jobs:
                       return ['***'] if value else []
                   if isinstance(value, dict):
                       return {str(k): sanitize(v, str(k)) for k, v in value.items()}
-                  if value is None:
-                      return None
-                  return '***'
+                  return None if value is None else '***'
               if isinstance(value, dict):
                   return {str(k): sanitize(v, str(k)) for k, v in value.items()}
               if isinstance(value, list):
@@ -112,10 +134,13 @@ jobs:
                   return value.replace('fixture-token', '***').replace('fixture-cookie', '***').replace('fixture-password', '***')
               return value
 
+          basic = 'Basic ' + base64.b64encode(b'fixture-admin:fixture-password').decode()
           variants = [
+              ('anonymous', {}, {}),
               ('token-query', {'token': 'fixture-token'}, {}),
-              ('basic-only', {}, {'Authorization': 'Basic ' + base64.b64encode(b'fixture-admin:fixture-password').decode()}),
-              ('token-and-basic', {'token': 'fixture-token'}, {'Authorization': 'Basic ' + base64.b64encode(b'fixture-admin:fixture-password').decode()}),
+              ('basic-only', {}, {'Authorization': basic}),
+              ('token-and-basic', {'token': 'fixture-token'}, {'Authorization': basic}),
+              ('bearer-token', {}, {'Authorization': 'Bearer fixture-token'}),
           ]
           results = []
           for name, query, headers in variants:
@@ -131,19 +156,37 @@ jobs:
                   body = error.read().decode('utf-8', errors='replace')
                   status = error.code
               except Exception as error:
-                  results.append({'variant': name, 'errorType': type(error).__name__})
+                  results.append({'variant': name, 'errorType': type(error).__name__, 'message': str(error)[:120]})
                   continue
               try:
                   parsed = json.loads(body)
               except Exception:
                   parsed = {'rawLength': len(body), 'rawPrefix': body[:120]}
               results.append({'variant': name, 'status': status, 'body': sanitize(parsed)})
-          (output / 'authenticated-data-responses.json').write_text(
-              json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
-              encoding='utf-8',
+          Path('/tmp/qas-inspect/authenticated-data-responses.json').write_text(
+              json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True) + '\n', encoding='utf-8'
           )
           PY
-          python3 /tmp/capture_qas_api.py
+          docker cp qas-inspect:/app/config /tmp/qas-inspect/config-final
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in Path('/tmp/qas-inspect/config-final').rglob('*.json'):
+              try:
+                  value = json.loads(path.read_text(encoding='utf-8'))
+              except Exception:
+                  continue
+              def scrub(item, key=''):
+                  if any(term in key.casefold() for term in ('cookie', 'token', 'password', 'secret', 'authorization')):
+                      if isinstance(item, list): return ['***'] if item else []
+                      if isinstance(item, dict): return {str(k): scrub(v, str(k)) for k, v in item.items()}
+                      return None if item is None else '***'
+                  if isinstance(item, dict): return {str(k): scrub(v, str(k)) for k, v in item.items()}
+                  if isinstance(item, list): return [scrub(v, key) for v in item]
+                  if isinstance(item, str): return item.replace('fixture-token', '***').replace('fixture-cookie', '***')
+                  return item
+              path.write_text(json.dumps(scrub(value), ensure_ascii=False, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
           docker logs qas-inspect > /tmp/qas-inspect/container.log 2>&1 || true
           sed -i 's/fixture-token/***/g; s/fixture-cookie/***/g; s/fixture-password/***/g' /tmp/qas-inspect/container.log
       - name: Upload inspected contract
