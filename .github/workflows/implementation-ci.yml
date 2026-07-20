@@ -21,7 +21,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run existing test suite
-        run: python3 -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set +e
+          python3 -m unittest discover -s tests -v > /tmp/unittest.log 2>&1
+          status=$?
+          tail -n 100 /tmp/unittest.log
+          exit "$status"
       - name: Validate committed JSON
         run: |
           python3 -m json.tool config/routing.json >/dev/null
