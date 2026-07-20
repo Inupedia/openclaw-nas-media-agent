@@ -1,2 +1,0 @@
-# Image digests are resolved through deploy/installer/versions.py and committed in deploy/versions.yaml.
-# This placeholder intentionally contains no workflow trigger.
