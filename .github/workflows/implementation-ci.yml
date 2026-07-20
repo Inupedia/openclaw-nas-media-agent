@@ -55,7 +55,7 @@ jobs:
         run: |
           set +e
           {
-            python3 -m pip install pip-tools==7.6.0
+            python3 -m pip install pip-tools==7.6.0 typing-extensions
             pip-compile --generate-hashes --output-file /tmp/requirements.lock deploy/requirements.in
           } > /tmp/requirements-lock.log 2>&1
           status=$?
