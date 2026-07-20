@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import TextIO
 
+from .command import CommandRunner
+from .config import load_config
+from .discovery import discover
 from .errors import DeploymentError
+from .models import Change
 from .output import emit, result_payload
+from .planning import build_plan
+from .runtime import RuntimePaths, atomic_write_json
+from .secrets import SecretStore
 
 
 class CliUsageError(ValueError):
@@ -17,6 +26,7 @@ class CliUsageError(ValueError):
 
 class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
+        del message
         raise CliUsageError("invalid command or arguments")
 
 
@@ -111,17 +121,83 @@ def _error_payload(error: DeploymentError) -> dict[str, object]:
     )
 
 
+def _project_root(value: Path | None = None) -> Path:
+    return (
+        Path(__file__).resolve().parents[2]
+        if value is None
+        else Path(value).resolve()
+    )
+
+
+def run_discover(
+    project_root: Path,
+    *,
+    runner: CommandRunner | None = None,
+) -> dict[str, object]:
+    root = _project_root(project_root)
+    config = load_config(root / "deploy" / "config.yaml")
+    runtime = RuntimePaths.for_project(root)
+    report = discover(config, runner or CommandRunner(cwd=root))
+    report_data = report.to_dict()
+    atomic_write_json(runtime.discovery_report, report_data)
+    return result_payload(
+        ok=True,
+        status="ready",
+        next_action="run_plan",
+        data=report_data,
+    )
+
+
+def run_plan(
+    project_root: Path,
+    *,
+    runner: CommandRunner | None = None,
+    changes: Sequence[Change] = (),
+    now: int | None = None,
+) -> dict[str, object]:
+    root = _project_root(project_root)
+    config = load_config(root / "deploy" / "config.yaml")
+    runtime = RuntimePaths.for_project(root)
+    secrets = SecretStore(root / "deploy" / "secrets")
+    report = discover(config, runner or CommandRunner(cwd=root))
+    atomic_write_json(runtime.discovery_report, report.to_dict())
+    plan = build_plan(
+        config,
+        secrets,
+        report,
+        tuple(changes),
+        int(time.time()) if now is None else int(now),
+    )
+    plan_data = plan.to_dict()
+    atomic_write_json(runtime.plan_file, plan_data)
+    return result_payload(
+        ok=True,
+        status="ready_for_apply",
+        next_action="request_confirmation",
+        data=plan_data,
+    )
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     stream: TextIO | None = None,
+    project_root: Path | None = None,
+    runner_factory: Callable[[], CommandRunner] = CommandRunner,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     target = sys.stdout if stream is None else stream
+    root = _project_root(project_root)
     try:
         args = build_parser().parse_args(arguments)
         if getattr(args, "show_help", False) or not getattr(args, "command", None):
             emit(_help_payload(), target)
+            return 0
+        if args.command == "discover":
+            emit(run_discover(root, runner=runner_factory()), target)
+            return 0
+        if args.command == "plan":
+            emit(run_plan(root, runner=runner_factory()), target)
             return 0
         emit(_pending_payload(args), target)
         return 2
@@ -135,7 +211,7 @@ def main(
         return 2
     except DeploymentError as error:
         emit(_error_payload(error), target)
-        return 1
+        return 2 if error.status == "manual_action_required" else 1
 
 
 if __name__ == "__main__":
