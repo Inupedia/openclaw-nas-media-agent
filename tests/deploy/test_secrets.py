@@ -38,12 +38,19 @@ class SecretTests(unittest.TestCase):
             SecretStore(self.root)
         self.assertEqual(ctx.exception.severity, "security_block")
 
-    def test_rejects_traversal_and_symlinks(self):
+    def test_rejects_traversal_symlinks_and_control_characters(self):
         outside = Path(self.temp_dir.name) / "outside"
         outside.write_text("secret", encoding="utf-8")
         outside.chmod(0o600)
         (self.root / "linked").symlink_to(outside)
-        for name in ("../outside", "folder/value", "folder\\value", "linked"):
+        for name in (
+            "../outside",
+            "folder/value",
+            "folder\\value",
+            "linked",
+            "bad\nname",
+            "bad\x00name",
+        ):
             with self.subTest(name=name):
                 with self.assertRaises(DeploymentError) as ctx:
                     self.store.read(name)
