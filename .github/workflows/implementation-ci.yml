@@ -1,0 +1,28 @@
+name: Implementation Verification
+
+on:
+  push:
+    branches:
+      - feat/existing-openclaw-deployer
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run existing test suite
+        run: python3 -m unittest discover -s tests -v
+      - name: Validate committed JSON
+        run: |
+          python3 -m json.tool config/routing.json >/dev/null
+          python3 -m json.tool config/command-contract.json >/dev/null
