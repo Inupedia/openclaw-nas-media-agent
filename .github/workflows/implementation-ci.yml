@@ -9,7 +9,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   baseline:
@@ -43,37 +43,24 @@ jobs:
           python3 -m json.tool config/commands.json >/dev/null
 
   deployment-lock:
+    if: github.event_name == 'push' && hashFiles('deploy/requirements.lock') == ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: feat/existing-openclaw-deployer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
       - name: Generate hash-locked requirements
-        shell: bash
         run: |
-          set +e
-          {
-            python3 -m pip install pip-tools==7.6.0 typing-extensions
-            pip-compile --generate-hashes --output-file /tmp/requirements.lock deploy/requirements.in
-          } > /tmp/requirements-lock.log 2>&1
-          status=$?
-          tail -n 80 /tmp/requirements-lock.log
-          exit "$status"
-      - name: Upload lock generation log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-lock-log
-          path: /tmp/requirements-lock.log
-          if-no-files-found: error
-          retention-days: 3
-      - name: Upload requirements lock
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-requirements-lock
-          path: /tmp/requirements.lock
-          if-no-files-found: error
-          retention-days: 3
+          python3 -m pip install pip-tools==7.6.0 typing-extensions
+          pip-compile --generate-hashes --output-file deploy/requirements.lock deploy/requirements.in
+      - name: Commit requirements lock
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/requirements.lock
+          git commit -m "build(deploy): add hashed dependency lock"
+          git push origin HEAD:feat/existing-openclaw-deployer
