@@ -77,7 +77,10 @@ class RendererTests(unittest.TestCase):
         self.assertIn("${ARIA2_RPC_SECRET:?loaded by deployer}", content)
         self.assertNotIn("token-123", content)
         parsed = yaml.safe_load(content)
-        self.assertEqual(parsed["services"]["aria2"]["volumes"][1]["target"], "/nas/downloads")
+        self.assertEqual(
+            parsed["services"]["aria2"]["volumes"][1]["target"],
+            "/nas/downloads",
+        )
 
     def test_missing_template_context_is_blocking(self):
         with self.assertRaises(DeploymentError) as ctx:
@@ -107,7 +110,17 @@ class RendererTests(unittest.TestCase):
         routing = build_routing(self.config)
         self.assertEqual(
             set(routing),
-            {"movie", "tv", "drama", "anime", "documentary", "show", "other", "downloads", "paths"},
+            {
+                "movie",
+                "tv",
+                "drama",
+                "anime",
+                "documentary",
+                "show",
+                "other",
+                "downloads",
+                "paths",
+            },
         )
         self.assertEqual(routing["tv"]["final_root"], routing["drama"]["final_root"])
         self.assertEqual(
@@ -136,12 +149,22 @@ class RendererTests(unittest.TestCase):
         validate_json(routing, runner)
         self.assertEqual(
             runner.calls[0],
-            (("docker", "compose", "-f", str(compose), "config", "--quiet"), 60),
+            (
+                (
+                    "env",
+                    "QAS_WEBUI_PASSWORD=__OPENCLAW_VALIDATION_ONLY__",
+                    "ARIA2_RPC_SECRET=__OPENCLAW_VALIDATION_ONLY__",
+                    "docker",
+                    "compose",
+                    "-f",
+                    str(compose),
+                    "config",
+                    "--quiet",
+                ),
+                60,
+            ),
         )
-        self.assertEqual(
-            runner.calls[1][0][1:3],
-            ("-m", "json.tool"),
-        )
+        self.assertEqual(runner.calls[1][0][1:3], ("-m", "json.tool"))
 
         failing = ValidationRunner(returncode=1)
         with self.assertRaises(DeploymentError) as ctx:
