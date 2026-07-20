@@ -42,7 +42,7 @@ class InvalidComposeRunner(FixtureRunner):
     def run(self, args, timeout=30):
         key = tuple(args)
         if (
-            len(key) == 7
+            len(key) == 6
             and key[:3] == ("docker", "compose", "-f")
             and key[-2:] == ("config", "--quiet")
         ):
