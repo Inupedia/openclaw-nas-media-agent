@@ -44,3 +44,26 @@ jobs:
           python3 -m json.tool config/routing.json >/dev/null
           python3 -m json.tool config/commands.json >/dev/null
           python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
+      - name: Build sanitized source snapshot
+        if: always()
+        shell: bash
+        run: |
+          tar \
+            --exclude=.git \
+            --exclude=.deploy-venv \
+            --exclude=.venv \
+            --exclude='deploy/config.yaml' \
+            --exclude='deploy/secrets' \
+            --exclude='deploy/runtime' \
+            --exclude='*.db' \
+            --exclude='*.db-shm' \
+            --exclude='*.db-wal' \
+            -czf /tmp/source-snapshot.tar.gz .
+      - name: Upload source snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot
+          path: /tmp/source-snapshot.tar.gz
+          if-no-files-found: error
+          retention-days: 1
