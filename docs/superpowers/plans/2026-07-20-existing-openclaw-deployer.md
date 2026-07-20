@@ -2,110 +2,118 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the first production-ready deployment path for an NAS that already runs OpenClaw, so an Agent can discover the environment, generate an immutable plan, safely deploy or reuse QAS/PanSou/aria2, configure the Skill, verify the real chain, and roll back failures.
+**Goal:** Build a production-ready `existing-openclaw` deployment path that discovers an NAS safely, creates an immutable plan, deploys or reuses QAS, PanSou, aria2 and an optional proxy, configures the existing OpenClaw Skill and command allowlist, verifies the real chain, and rolls back failures.
 
-**Architecture:** `deploy/cli.py` is a standard-library launcher that creates a private deployment virtual environment and then delegates to a typed Python package under `deploy/installer/`. The package separates discovery, configuration, planning, rendering, execution, verification, and rollback; every external command is injected through a runner so unit tests never require a real NAS. Existing OpenClaw configuration is changed through a generated Compose override and generated Skill files instead of rewriting the user's original Compose file in place.
+**Architecture:** `deploy/cli.py` is a standard-library launcher. It creates a private deployment virtual environment and delegates to focused modules under `deploy/installer/`. Discovery is read-only, planning is immutable and expires after 30 minutes, apply is journaled and reversible, and every external command is injected through a runner so unit tests use fixtures rather than a live NAS.
 
-**Tech Stack:** Python 3.10+, `unittest`, PyYAML 6.x, Jinja2 3.1.x, jsonschema 4.x, Docker CLI, Docker Compose v2, standard-library `urllib`, JSON/YAML, POSIX file permissions.
+**Tech Stack:** Python 3.10+, `unittest`, PyYAML 6.0.3, Jinja2 3.1.6, jsonschema 4.26.0, Playwright 1.61.0, Docker CLI, Docker Compose v2, standard-library `urllib`, JSON/YAML, POSIX permissions and optional POSIX ACL.
 
 ## Global Constraints
 
 - This plan implements only `deployment.mode: existing-openclaw`.
 - First-class platforms are UGREEN UGOS and standard Linux Docker hosts.
-- Synology, QNAP, TrueNAS, and Unraid remain experimental and must be reported as such.
+- Synology, QNAP, TrueNAS and Unraid remain experimental and must be reported as such.
 - `deploy/config.yaml` is the only source of truth for non-sensitive deployment configuration.
 - Secrets live in `deploy/secrets/`; the directory mode is `0700` and ordinary secret files are `0600`.
-- Secrets never appear in Git, backups, plans, terminal JSON, stderr logs, or reports.
-- Plan validity is 30 minutes. A plan becomes invalid when config, secret metadata, discovery facts, or managed files drift.
+- Secrets never appear in Git, backups, plans, stdout JSON, stderr logs or reports.
+- Plan validity is exactly 30 minutes.
+- A plan becomes invalid when config, secret metadata, discovery facts or managed files drift.
 - `apply` requires both `--plan-id` and `--confirmed`.
-- `verify --level full` requires `verification.allow_real_download: true`, a legal user-provided test share URL, and `--confirmed`.
-- Full verification stops after `organize plan`; it must not run `organize execute`.
-- The final deployment state is exactly one of `ready`, `degraded`, `manual_action_required`, `failed`, or `rolled_back`.
-- `security_block` failures cannot be bypassed with a force flag.
-- Never recursively chmod a formal media library.
-- Do not assume aria2 runs as `nobody`; inspect its actual UID/GID.
-- Do not use mutable image references such as `latest` in a committed version lock.
-- Every task follows red-green-refactor TDD and ends with a focused commit.
+- `verify --level full` requires `verification.allow_real_download: true`, a legal user-provided Quark test share URL and `--confirmed`.
+- Full verification stops after `organize plan`; it never runs `organize execute`.
+- Final deployment state is exactly one of `ready`, `degraded`, `manual_action_required`, `failed` or `rolled_back`.
+- `security_block` failures cannot be bypassed with a force option.
+- Formal media libraries are never recursively chmoded, deleted or overwritten.
+- aria2 identity is discovered; the deployer never assumes `nobody:nogroup`.
+- Committed container images use immutable digests; `latest` is forbidden.
+- Every task uses red-green-refactor TDD and ends with a focused commit.
 
 ## File Map
 
-### New deployment entry points
+### Entry points and contracts
 
-- `deploy/cli.py`: dependency bootstrap and process re-exec only.
-- `deploy/requirements.lock`: Python deployment dependencies with bounded versions.
-- `deploy/config.example.yaml`: documented non-secret configuration example.
-- `deploy/versions.yaml`: immutable container version lock and adapter mapping.
-- `deploy/schemas/config.schema.json`: configuration contract.
+- `deploy/cli.py`: bootstrap and re-exec only.
+- `deploy/requirements.in`: exact top-level Python dependencies.
+- `deploy/requirements.lock`: full transitive lock with hashes.
+- `deploy/config.example.yaml`: documented non-secret configuration.
+- `deploy/versions.yaml`: immutable container image references and adapter names.
+- `deploy/schemas/config.schema.json`: configuration schema.
 
-### New deployment package
+### Deployment package
 
-- `deploy/installer/cli.py`: argument parsing and command dispatch.
-- `deploy/installer/models.py`: immutable dataclasses and enums shared across modules.
-- `deploy/installer/output.py`: single-JSON stdout contract.
-- `deploy/installer/errors.py`: typed deployment errors and severity mapping.
+- `deploy/installer/cli.py`: parser and command dispatch.
+- `deploy/installer/models.py`: shared immutable dataclasses and enums.
+- `deploy/installer/errors.py`: typed deployment exceptions.
+- `deploy/installer/output.py`: one-JSON-document stdout contract.
 - `deploy/installer/command.py`: injected subprocess runner.
-- `deploy/installer/config.py`: YAML loading, schema validation, defaults, and hashing.
-- `deploy/installer/secrets.py`: secret references, permissions, metadata hashes, and redaction values.
-- `deploy/installer/redaction.py`: recursive redaction for strings and structured data.
-- `deploy/installer/runtime.py`: runtime paths, atomic JSON writes, locks, and identifiers.
-- `deploy/installer/discovery.py`: host/Docker/container/network/path discovery.
-- `deploy/installer/platforms/linux.py`: Linux facts and filesystem checks.
-- `deploy/installer/platforms/ugos.py`: UGOS detection and capability flags.
+- `deploy/installer/config.py`: YAML load, schema validation and canonical digest.
+- `deploy/installer/secrets.py`: secret permission checks and metadata digest.
+- `deploy/installer/redaction.py`: recursive redaction.
+- `deploy/installer/runtime.py`: runtime paths, locks and atomic writes.
+- `deploy/installer/discovery.py`: host, Docker, container, network and mount discovery.
 - `deploy/installer/planning.py`: immutable change plan generation and validation.
-- `deploy/installer/versions.py`: version-lock parsing and immutable image validation.
-- `deploy/installer/renderer.py`: Jinja rendering and static validation.
-- `deploy/installer/backup.py`: timestamped backups without secret content.
-- `deploy/installer/executor.py`: transaction application and journal writing.
+- `deploy/installer/versions.py`: version-lock validation and maintainer resolution helper.
+- `deploy/installer/renderer.py`: strict template rendering and static validation.
+- `deploy/installer/permissions.py`: aria2 write-permission strategy.
+- `deploy/installer/backup.py`: secret-free backups.
+- `deploy/installer/executor.py`: journaled apply and resume.
 - `deploy/installer/rollback.py`: reverse journal execution.
-- `deploy/installer/verifier.py`: L0-L6 verification orchestration.
-- `deploy/installer/adapters/openclaw.py`: existing OpenClaw detection and Compose override generation.
-- `deploy/installer/adapters/qas_v1.py`: pinned QAS configuration/API adapter.
-- `deploy/installer/adapters/pansou.py`: PanSou configuration and Telegram reachability.
-- `deploy/installer/adapters/aria2.py`: aria2 identity, RPC, and write probes.
+- `deploy/installer/verifier.py`: L0-L6 verification.
+- `deploy/installer/platforms/linux.py`: Linux capabilities.
+- `deploy/installer/platforms/ugos.py`: UGOS detection and capabilities.
+- `deploy/installer/adapters/openclaw_v1.py`: supported OpenClaw configuration profile.
+- `deploy/installer/adapters/qas_v1.py`: pinned QAS configuration/API profile.
+- `deploy/installer/adapters/qas_browser.py`: Playwright fallback for known QAS UI.
+- `deploy/installer/adapters/pansou.py`: PanSou configuration and source verification.
+- `deploy/installer/adapters/proxy.py`: optional managed sing-box profile.
+- `deploy/installer/adapters/aria2.py`: RPC, identity, mount and write probes.
 
-### New templates and fixtures
+### Templates and fixtures
 
-- `deploy/templates/compose.dependencies.yml.j2`: QAS/PanSou/aria2 stack.
-- `deploy/templates/compose.openclaw.override.yml.j2`: generated override for the existing OpenClaw service.
-- `deploy/templates/routing.json.j2`: generated media routing.
-- `tests/fixtures/docker/*.json`: sanitized Docker inspect/config responses.
-- `tests/fixtures/qas-v1/*`: sanitized QAS configuration and API payloads from the pinned version.
+- `deploy/templates/compose.dependencies.yml.j2`: QAS, PanSou and aria2.
+- `deploy/templates/compose.proxy.yml.j2`: optional sing-box service.
+- `deploy/templates/compose.openclaw.override.yml.j2`: override for the discovered OpenClaw service.
+- `deploy/templates/routing.json.j2`: generated Skill routing.
+- `tests/fixtures/docker/`: sanitized Docker and Compose responses.
+- `tests/fixtures/openclaw-v1/`: sanitized supported OpenClaw configuration.
+- `tests/fixtures/qas-v1/`: sanitized QAS config, API and UI fixtures.
 
 ### Existing files modified
 
-- `.gitignore`: ignore runtime config, secrets, deployment venv, rendered output, and reports.
-- `scripts/download_fs.py`: replace unconditional world-writable behavior with an explicit permission policy.
-- `scripts/resource_agent.py`: readiness checks use effective write probes rather than `is_world_writable`.
-- `tests/test_download_fs.py`: cover UID/GID/group permission strategies.
-- `deploy/docker-compose.dependencies.yml`: become a generated-example wrapper or remain documented reference pointing to the version-locked template.
-- `README.md`: make the new CLI the primary existing-OpenClaw path.
-- `docs/AGENT_DEPLOY.md`: align the Agent contract with `init/discover/plan/apply/verify/rollback`.
+- `.gitignore`
+- `scripts/download_fs.py`
+- `scripts/resource_agent.py`
+- `tests/test_download_fs.py`
+- `deploy/docker-compose.dependencies.yml`
+- `README.md`
+- `docs/AGENT_DEPLOY.md`
 
 ---
 
-### Task 1: Add the self-bootstrapping deployment CLI and JSON output contract
+### Task 1: Add the bootstrap CLI, exact dependency input and hashed lock
 
 **Files:**
 - Create: `deploy/cli.py`
+- Create: `deploy/requirements.in`
 - Create: `deploy/requirements.lock`
 - Create: `deploy/installer/__init__.py`
 - Create: `deploy/installer/cli.py`
-- Create: `deploy/installer/output.py`
 - Create: `deploy/installer/errors.py`
+- Create: `deploy/installer/output.py`
 - Create: `tests/deploy/__init__.py`
 - Create: `tests/deploy/test_cli.py`
 
 **Interfaces:**
 - Produces: `deploy.installer.cli.main(argv: list[str] | None = None) -> int`
-- Produces: `DeploymentError(code, message, status, next_action, severity, details)`
+- Produces: `DeploymentError`
 - Produces: `result_payload(...) -> dict[str, object]`
-- Produces: `emit(payload: dict[str, object], stream: TextIO = sys.stdout) -> None`
+- Produces: `emit(payload: dict[str, object], stream: TextIO) -> None`
 
 - [ ] **Step 1: Write the failing output-contract test**
 
 ```python
 class OutputContractTests(unittest.TestCase):
-    def test_emit_writes_one_json_document(self):
+    def test_emit_writes_exactly_one_json_document(self):
         stream = io.StringIO()
         emit(result_payload(ok=True, status="ready", next_action="none"), stream)
         lines = stream.getvalue().splitlines()
@@ -117,26 +125,32 @@ class OutputContractTests(unittest.TestCase):
 
 Run: `python3 -m unittest tests.deploy.test_cli.OutputContractTests -v`
 
-Expected: `ERROR` with `ModuleNotFoundError: No module named 'deploy.installer.output'`.
+Expected: `ModuleNotFoundError` for `deploy.installer.output`.
 
-- [ ] **Step 3: Implement the minimal output and error types**
+- [ ] **Step 3: Implement the exception and output types**
 
 ```python
-@dataclass(frozen=True)
 class DeploymentError(RuntimeError):
-    code: str
-    message: str
-    status: str = "failed"
-    next_action: str = "review_error"
-    severity: str = "blocking"
-    details: Mapping[str, object] = field(default_factory=dict)
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status: str = "failed",
+        next_action: str = "review_error",
+        severity: str = "blocking",
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.next_action = next_action
+        self.severity = severity
+        self.details = dict(details or {})
 
-    def __str__(self) -> str:
-        return self.message
 
-
-def result_payload(*, ok: bool, status: str, next_action: str, data=None,
-                   warnings=None, errors=None) -> dict[str, object]:
+def result_payload(*, ok: bool, status: str, next_action: str,
+                   data=None, warnings=None, errors=None) -> dict[str, object]:
     return {
         "ok": ok,
         "status": status,
@@ -145,70 +159,130 @@ def result_payload(*, ok: bool, status: str, next_action: str, data=None,
         "warnings": list(warnings or []),
         "errors": list(errors or []),
     }
-
-
-def emit(payload: dict[str, object], stream=sys.stdout) -> None:
-    stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
 ```
 
-- [ ] **Step 4: Add the launcher dependency bootstrap test**
+- [ ] **Step 4: Add launcher tests for private-venv preference and loop prevention**
 
 ```python
 class LauncherTests(unittest.TestCase):
     def test_runtime_python_prefers_private_venv(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            expected = root / ".deploy-venv" / "bin" / "python"
-            expected.parent.mkdir(parents=True)
-            expected.write_text("", encoding="utf-8")
-            expected.chmod(0o755)
-            self.assertEqual(resolve_runtime_python(root), expected)
+            runtime = root / ".deploy-venv" / "bin" / "python"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text("", encoding="utf-8")
+            runtime.chmod(0o755)
+            self.assertEqual(resolve_runtime_python(root), runtime)
 ```
 
-- [ ] **Step 5: Implement `deploy/cli.py` as a standard-library-only launcher**
+- [ ] **Step 5: Implement `deploy/cli.py` using only the standard library**
 
-The launcher must create `.deploy-venv`, install `deploy/requirements.lock`, and re-exec `python -m deploy.installer.cli`. It must set `OPENCLAW_DEPLOY_BOOTSTRAPPED=1` before re-exec to prevent loops. A failed venv or pip operation emits one JSON error with `nextAction: install_python_venv_or_dependencies`.
+The launcher creates `.deploy-venv`, installs with `pip install --require-hashes -r deploy/requirements.lock`, sets `OPENCLAW_DEPLOY_BOOTSTRAPPED=1`, and re-execs `python -m deploy.installer.cli`. Bootstrap failure emits one JSON error with `nextAction: install_python_venv_or_dependencies`.
 
-- [ ] **Step 6: Lock bounded Python dependencies**
+- [ ] **Step 6: Commit exact top-level dependency input**
 
-`deploy/requirements.lock`:
+`deploy/requirements.in`:
 
 ```text
-Jinja2>=3.1,<4
-jsonschema>=4.23,<5
-PyYAML>=6.0,<7
+Jinja2==3.1.6
+jsonschema==4.26.0
+playwright==1.61.0
+PyYAML==6.0.3
 ```
 
-- [ ] **Step 7: Add parser smoke tests for every command name**
+Generate the lock in a clean Python 3.10 virtual environment:
 
-Test `init`, `discover`, `plan`, `apply`, `verify`, `rollback`, and `versions check`; unimplemented handlers must return a structured `manual_action_required` result rather than a traceback.
+```bash
+python3 -m venv .deploy-lock-venv
+.deploy-lock-venv/bin/python -m pip install pip-tools==7.6.0
+.deploy-lock-venv/bin/pip-compile --generate-hashes --output-file deploy/requirements.lock deploy/requirements.in
+rm -rf .deploy-lock-venv
+```
 
-- [ ] **Step 8: Run the focused test and full existing suite**
+- [ ] **Step 7: Add parser smoke tests**
 
-Run:
+Test `init`, `discover`, `plan`, `apply`, `verify`, `rollback` and `versions check`. Unimplemented handlers return structured `manual_action_required`, never a traceback.
+
+- [ ] **Step 8: Run focused and full tests**
 
 ```bash
 python3 -m unittest tests.deploy.test_cli -v
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: all tests pass and stdout tests observe exactly one JSON line.
-
 - [ ] **Step 9: Commit**
 
 ```bash
-git add deploy/cli.py deploy/requirements.lock deploy/installer tests/deploy
-git commit -m "feat(deploy): add bootstrap CLI and output contract"
+git add deploy/cli.py deploy/requirements.in deploy/requirements.lock deploy/installer tests/deploy
+git commit -m "feat(deploy): add bootstrap CLI and locked runtime"
 ```
 
 ---
 
-### Task 2: Implement configuration schema, secret references, and redaction
+### Task 2: Define shared models, runtime state and atomic JSON writes
+
+**Files:**
+- Create: `deploy/installer/models.py`
+- Create: `deploy/installer/runtime.py`
+- Create: `tests/deploy/test_models.py`
+- Create: `tests/deploy/test_runtime.py`
+
+**Interfaces:**
+- Produces: `DeploymentStatus`, `Severity`, `ChangePhase`
+- Produces: `Change`, `DeploymentPlan`, `ComponentResult`, `VerificationResult`
+- Produces: `RuntimePaths.for_project(project_root: Path) -> RuntimePaths`
+- Produces: `atomic_write_json(path: Path, payload: Mapping[str, object]) -> None`
+
+- [ ] **Step 1: Write enum and serialization tests**
+
+```python
+class ModelTests(unittest.TestCase):
+    def test_status_values_are_closed(self):
+        self.assertEqual(
+            {item.value for item in DeploymentStatus},
+            {"ready", "degraded", "manual_action_required", "failed", "rolled_back"},
+        )
+```
+
+- [ ] **Step 2: Implement frozen dataclasses and explicit `to_dict()` methods**
+
+Every serialized field uses camelCase at the JSON boundary and snake_case internally. Unknown status or severity strings raise `ValueError` during deserialization.
+
+- [ ] **Step 3: Write atomic-write and permission tests**
+
+Assert runtime directories are `0700`, JSON files are `0600`, interrupted writes leave the previous file intact, and symlink destinations are rejected.
+
+- [ ] **Step 4: Implement `RuntimePaths`**
+
+Use these exact paths:
+
+```text
+deploy/runtime/plan.json
+deploy/runtime/reports/discovery.json
+deploy/runtime/reports/apply.json
+deploy/runtime/reports/verify.json
+deploy/runtime/backups/{deployment_id}/
+deploy/runtime/journals/{deployment_id}.json
+```
+
+Use `secrets.token_urlsafe(18)` for plan and deployment identifiers.
+
+- [ ] **Step 5: Run tests and commit**
+
+```bash
+python3 -m unittest tests.deploy.test_models tests.deploy.test_runtime -v
+python3 -m unittest discover -s tests -v
+git add deploy/installer/models.py deploy/installer/runtime.py tests/deploy
+git commit -m "feat(deploy): add immutable runtime models"
+```
+
+---
+
+### Task 3: Implement schema-validated config, secret isolation and redaction
 
 **Files:**
 - Create: `deploy/config.example.yaml`
 - Create: `deploy/schemas/config.schema.json`
-- Create: `deploy/installer/models.py`
 - Create: `deploy/installer/config.py`
 - Create: `deploy/installer/secrets.py`
 - Create: `deploy/installer/redaction.py`
@@ -220,7 +294,7 @@ git commit -m "feat(deploy): add bootstrap CLI and output contract"
 - Produces: `DeploymentConfig`
 - Produces: `load_config(path: Path) -> DeploymentConfig`
 - Produces: `config_digest(config: DeploymentConfig) -> str`
-- Produces: `SecretStore(root: Path).read(name: str) -> str`
+- Produces: `SecretStore.read(name: str) -> str`
 - Produces: `SecretStore.metadata_digest(names: Collection[str]) -> str`
 - Produces: `redact(value: object, secret_values: Collection[str]) -> object`
 
@@ -234,7 +308,7 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(DeploymentError, "existing-openclaw"):
             load_config(write_yaml(raw))
 
-    def test_requires_formal_library_paths(self):
+    def test_missing_movie_library_is_security_block(self):
         raw = minimal_config()
         del raw["nas"]["libraries"]["movie"]
         with self.assertRaises(DeploymentError) as ctx:
@@ -242,48 +316,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(ctx.exception.severity, "security_block")
 ```
 
-- [ ] **Step 2: Run the failing tests**
+- [ ] **Step 2: Define the schema**
 
-Run: `python3 -m unittest tests.deploy.test_config -v`
+Set `additionalProperties: false` for every object. Enumerate deployment mode to `existing-openclaw`, service mode to `auto|reuse|managed|disabled`, proxy mode to `none|existing|managed`, and platform to `auto|ugos|linux|experimental`.
 
-Expected: import failure for `deploy.installer.config`.
+- [ ] **Step 3: Construct immutable configuration dataclasses**
 
-- [ ] **Step 3: Define immutable configuration dataclasses**
+Normalize all filesystem values to absolute `Path` objects. Reject NUL bytes, relative paths, empty strings and formal media libraries that are descendants of the download root.
 
-```python
-@dataclass(frozen=True)
-class LibraryPaths:
-    movie: Path
-    drama: Path
-    anime: Path
-    documentary: Path
-    show: Path
-    other: Path
-
-@dataclass(frozen=True)
-class DeploymentConfig:
-    project_dir: Path
-    timezone: str
-    platform: str
-    downloads_dir: Path
-    organizing_dir: Path
-    libraries: LibraryPaths
-    openclaw_container: str
-    openclaw_workspace_host_dir: Path | None
-    openclaw_config_host_path: Path | None
-    qas: Mapping[str, object]
-    aria2: Mapping[str, object]
-    pansou: Mapping[str, object]
-    verification: Mapping[str, object]
-```
-
-Use normalized absolute paths and reject paths containing NUL characters, relative components, or empty strings.
-
-- [ ] **Step 4: Implement JSON Schema validation before dataclass construction**
-
-The schema must set `additionalProperties: false` for every object, enumerate `deployment.mode` to `existing-openclaw`, enumerate proxy modes to `none|existing|managed`, and cap candidate limits to the existing business limits.
-
-- [ ] **Step 5: Write failing secret permission and redaction tests**
+- [ ] **Step 4: Write secret-permission and redaction tests**
 
 ```python
 class SecretTests(unittest.TestCase):
@@ -295,21 +336,19 @@ class SecretTests(unittest.TestCase):
             self.store.read("qas_token")
         self.assertEqual(ctx.exception.severity, "security_block")
 
-    def test_redacts_nested_and_embedded_values(self):
-        value = {"url": "http://x/?token=token-123", "items": ["token-123"]}
+    def test_redacts_embedded_values(self):
+        value = {"url": "http://service/?token=token-123", "items": ["token-123"]}
         self.assertEqual(
             redact(value, ["token-123"]),
-            {"url": "http://x/?token=***", "items": ["***"]},
+            {"url": "http://service/?token=***", "items": ["***"]},
         )
 ```
 
-- [ ] **Step 6: Implement secret validation**
+- [ ] **Step 5: Implement `SecretStore`**
 
-`SecretStore` must reject names containing `/`, `\\`, or `..`; verify the root is `0700`; verify files are regular files with mode `0600`; trim one trailing newline; and never expose values in `repr`.
+Reject secret names containing `/`, `\\` or `..`. Require root mode `0700`, file mode `0600`, regular files and no symlink traversal. Trim one trailing newline only. `repr` exposes names, never values.
 
-- [ ] **Step 7: Extend `.gitignore`**
-
-Add exactly:
+- [ ] **Step 6: Extend `.gitignore`**
 
 ```gitignore
 .deploy-venv/
@@ -318,23 +357,18 @@ deploy/secrets/
 deploy/runtime/
 ```
 
-- [ ] **Step 8: Run focused and full tests**
+- [ ] **Step 7: Run tests and commit**
 
 ```bash
 python3 -m unittest tests.deploy.test_config tests.deploy.test_secrets -v
 python3 -m unittest discover -s tests -v
-```
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add .gitignore deploy/config.example.yaml deploy/schemas deploy/installer tests/deploy
+git add .gitignore deploy/config.example.yaml deploy/schemas deploy/installer/config.py deploy/installer/secrets.py deploy/installer/redaction.py tests/deploy
 git commit -m "feat(deploy): add validated config and secret isolation"
 ```
 
 ---
 
-### Task 3: Add deterministic command execution and host discovery
+### Task 4: Add deterministic command execution and read-only host discovery
 
 **Files:**
 - Create: `deploy/installer/command.py`
@@ -349,14 +383,13 @@ git commit -m "feat(deploy): add validated config and secret isolation"
 - Create: `tests/fixtures/docker/networks.json`
 
 **Interfaces:**
-- Produces: `CommandResult(args, returncode, stdout, stderr)`
+- Produces: `CommandResult`
 - Produces: `CommandRunner.run(args: Sequence[str], timeout: int = 30) -> CommandResult`
-- Produces: `DiscoveryReport`
 - Produces: `discover(config: DeploymentConfig, runner: CommandRunner) -> DiscoveryReport`
 
-- [ ] **Step 1: Write failing command-runner tests**
+- [ ] **Step 1: Write command-runner tests**
 
-Test that arguments are passed as an argv list with `shell=False`, environment values are redacted from exceptions, timeout maps to `DISCOVERY_COMMAND_TIMEOUT`, and nonzero exit status is returned without automatically throwing.
+Assert argv lists are passed with `shell=False`, timeouts map to `DISCOVERY_COMMAND_TIMEOUT`, secret sentinels are redacted from failures, and nonzero return codes are represented without automatic exceptions.
 
 - [ ] **Step 2: Implement the runner**
 
@@ -372,9 +405,9 @@ completed = subprocess.run(
 )
 ```
 
-Do not accept a command string API.
+Do not expose a command-string API.
 
-- [ ] **Step 3: Write failing discovery fixture tests**
+- [ ] **Step 3: Write fixture-driven discovery tests**
 
 ```python
 class DiscoveryTests(unittest.TestCase):
@@ -383,108 +416,83 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(report.openclaw.container_name, "openclaw-gateway")
         self.assertEqual(report.openclaw.compose_service, "gateway")
         self.assertEqual(report.platform.kind, "ugos")
-
-    def test_multiple_openclaw_candidates_require_selection(self):
-        runner = FixtureRunner(with_second_openclaw(self.fixture_map))
-        with self.assertRaises(DeploymentError) as ctx:
-            discover(self.config, runner)
-        self.assertEqual(ctx.exception.status, "manual_action_required")
 ```
 
-- [ ] **Step 4: Implement read-only discovery commands**
+Also test zero candidates and two equally valid candidates return `manual_action_required` with distinct `nextAction` values.
 
-Use only:
+- [ ] **Step 4: Implement read-only discovery calls**
 
-```text
-uname -s
-uname -m
-cat /etc/os-release
-docker version --format {{json .}}
-docker compose version --short
-docker ps -a --format {{json .}}
-docker network ls --format {{json .}}
-docker inspect <candidate>
-docker compose -p <project> config --format json
-stat -c %a:%u:%g:%F <path>
-df -P <path>
+Use runner arguments built from real variables:
+
+```python
+runner.run(["uname", "-s"])
+runner.run(["uname", "-m"])
+runner.run(["cat", "/etc/os-release"])
+runner.run(["docker", "version", "--format", "{{json .}}"])
+runner.run(["docker", "compose", "version", "--short"])
+runner.run(["docker", "ps", "-a", "--format", "{{json .}}"])
+runner.run(["docker", "network", "ls", "--format", "{{json .}}"])
+runner.run(["docker", "inspect", candidate_name])
+runner.run(["docker", "compose", "-p", compose_project, "config", "--format", "json"])
+runner.run(["stat", "-c", "%a:%u:%g:%F", str(target_path)])
+runner.run(["df", "-P", str(target_path)])
 ```
 
-Discovery must not create directories, networks, files, or containers.
+Discovery must not create directories, networks, files or containers.
 
 - [ ] **Step 5: Implement OpenClaw candidate scoring**
 
-A candidate is accepted only when all are true:
+Require OpenClaw name/image evidence, Compose labels, a writable workspace bind mount and a Compose service that matches the running container. Unsupported Docker-run-only installations return `nextAction: convert_openclaw_to_compose_or_configure_manually`.
 
-1. container name or image contains `openclaw` case-insensitively;
-2. Compose labels identify project, service, working directory, and config files;
-3. one mount destination is `/root/.openclaw/workspace` or ends with `/.openclaw/workspace`;
-4. the Compose service from `docker compose config --format json` matches the running container.
+- [ ] **Step 6: Implement UGOS and Linux capability detection**
 
-Zero candidates returns `manual_action_required` with `nextAction: specify_openclaw_container`; multiple tied candidates return `nextAction: choose_openclaw_container`.
+Store `architecture`, `supports_compose_v2`, `supports_posix_acl`, filesystem types and platform confidence. Do not infer write behavior from platform name alone.
 
-- [ ] **Step 6: Implement UGOS detection**
-
-Classify as `ugos` when `/etc/os-release` content or known system markers contain `ugreen` or `ugos`; otherwise classify as `linux`. Store capabilities, not guessed behavior: `supports_posix_acl`, `supports_compose_v2`, `architecture`, and `filesystem_types`.
-
-- [ ] **Step 7: Run tests**
+- [ ] **Step 7: Run tests and commit**
 
 ```bash
 python3 -m unittest tests.deploy.test_command tests.deploy.test_discovery -v
 python3 -m unittest discover -s tests -v
-```
-
-- [ ] **Step 8: Commit**
-
-```bash
 git add deploy/installer/command.py deploy/installer/discovery.py deploy/installer/platforms tests/deploy tests/fixtures/docker
 git commit -m "feat(deploy): add read-only NAS and Docker discovery"
 ```
 
 ---
 
-### Task 4: Add runtime state, immutable plans, drift checks, and 30-minute expiry
+### Task 5: Add immutable plans, conflict detection, drift checks and expiry
 
 **Files:**
-- Create: `deploy/installer/runtime.py`
 - Create: `deploy/installer/planning.py`
-- Create: `tests/deploy/test_runtime.py`
 - Create: `tests/deploy/test_plan.py`
+- Modify: `deploy/installer/cli.py`
 
 **Interfaces:**
-- Produces: `Change(id, component, action, target, before, after, side_effect, rollback)`
-- Produces: `DeploymentPlan(plan_id, created_at, expires_at, config_digest, secret_digest, discovery_digest, changes)`
-- Produces: `build_plan(config, secrets, discovery, adapters, now) -> DeploymentPlan`
+- Produces: `build_plan(config, secrets, discovery, changes, now) -> DeploymentPlan`
 - Produces: `validate_plan(plan, current_facts, now) -> None`
-- Produces: `atomic_write_json(path: Path, payload: Mapping[str, object]) -> None`
 
-- [ ] **Step 1: Write failing plan-expiry and drift tests**
+- [ ] **Step 1: Write expiry and drift tests**
 
 ```python
 class PlanTests(unittest.TestCase):
     def test_plan_expires_after_thirty_minutes(self):
-        plan = make_plan(created_at=1_000)
+        plan = make_plan(created_at=1000, expires_at=2800)
         with self.assertRaisesRegex(DeploymentError, "expired"):
-            validate_plan(plan, matching_facts(), now=2_801)
+            validate_plan(plan, matching_facts(), now=2801)
 
-    def test_secret_metadata_drift_invalidates_plan(self):
+    def test_secret_metadata_drift_requires_new_plan(self):
         plan = make_plan(secret_digest="sha256:old")
-        facts = matching_facts(secret_digest="sha256:new")
         with self.assertRaises(DeploymentError) as ctx:
-            validate_plan(plan, facts, now=1_100)
+            validate_plan(plan, matching_facts(secret_digest="sha256:new"), now=1100)
         self.assertEqual(ctx.exception.next_action, "regenerate_plan")
 ```
 
-- [ ] **Step 2: Implement canonical hashing**
+- [ ] **Step 2: Implement canonical SHA-256 hashing**
 
-Use UTF-8 JSON with `sort_keys=True`, compact separators, and SHA-256. Hash secret metadata as name, inode where available, size, mode, and modification nanoseconds; never hash secret content into reports.
+Use UTF-8 JSON with sorted keys and compact separators. Secret metadata includes name, size, mode, inode when available and modification nanoseconds; secret content is never put into a report.
 
-- [ ] **Step 3: Implement unpredictable identifiers**
+- [ ] **Step 3: Implement ordered phases and conflict detection**
 
-Use `secrets.token_urlsafe(18)` for `plan_id` and `deployment_id`. Runtime files live under `deploy/runtime/` and are written with mode `0600` using a temporary file plus `os.replace`.
-
-- [ ] **Step 4: Implement plan ordering and conflict checks**
-
-Sort changes by these phases:
+Use this order:
 
 ```text
 backup
@@ -492,29 +500,29 @@ filesystem
 network
 compose
 service_config
-openclaw_override
+openclaw_config
 restart
 verification
 ```
 
-Reject two changes that write the same target with different `after` values.
+Reject two changes that write the same target with different final states.
 
-- [ ] **Step 5: Add CLI handlers for `discover` and `plan`**
+- [ ] **Step 4: Add CLI `discover` and `plan` handlers**
 
-`discover` writes `reports/discovery.json`. `plan` writes `plan.json` and returns `status: ready_for_apply`, `nextAction: request_confirmation`, a redacted change list, and the 30-minute expiry timestamp.
+`discover` writes `reports/discovery.json`. `plan` writes `plan.json` and emits `ready_for_apply`, `request_confirmation`, redacted changes and an exact expiry timestamp.
 
-- [ ] **Step 6: Run tests and commit**
+- [ ] **Step 5: Run tests and commit**
 
 ```bash
-python3 -m unittest tests.deploy.test_runtime tests.deploy.test_plan -v
+python3 -m unittest tests.deploy.test_plan -v
 python3 -m unittest discover -s tests -v
-git add deploy/installer/runtime.py deploy/installer/planning.py deploy/installer/cli.py tests/deploy
+git add deploy/installer/planning.py deploy/installer/cli.py tests/deploy/test_plan.py
 git commit -m "feat(deploy): add immutable plans and drift protection"
 ```
 
 ---
 
-### Task 5: Add immutable image locking and deterministic template rendering
+### Task 6: Lock container images and render deterministic configuration
 
 **Files:**
 - Create: `deploy/versions.yaml`
@@ -528,9 +536,9 @@ git commit -m "feat(deploy): add immutable plans and drift protection"
 **Interfaces:**
 - Produces: `VersionLock.load(path: Path) -> VersionLock`
 - Produces: `VersionLock.image(component: str) -> str`
-- Produces: `render_template(name: str, context: Mapping[str, object], destination: Path) -> RenderedFile`
+- Produces: `render_template(name, context, destination) -> RenderedFile`
 
-- [ ] **Step 1: Write failing mutable-reference tests**
+- [ ] **Step 1: Write mutable-reference rejection tests**
 
 ```python
 class VersionTests(unittest.TestCase):
@@ -539,30 +547,30 @@ class VersionTests(unittest.TestCase):
             VersionLock.from_dict({"qas": {"image": "cp0204/quark-auto-save:latest"}})
         self.assertEqual(ctx.exception.severity, "security_block")
 
-    def test_requires_digest(self):
+    def test_requires_sha256_digest(self):
         with self.assertRaises(DeploymentError):
             VersionLock.from_dict({"qas": {"image": "cp0204/quark-auto-save:1.0"}})
 ```
 
-- [ ] **Step 2: Add a version-resolution helper used only by maintainers**
+- [ ] **Step 2: Implement the maintainer-only resolver**
 
-Create an internal function that runs `docker buildx imagetools inspect IMAGE --format '{{json .Manifest.Digest}}'`, validates `sha256:[0-9a-f]{64}`, and writes `IMAGE@DIGEST`. During implementation, resolve each currently tested QAS, PanSou, and aria2 image and commit only immutable references. The command must fail rather than preserve a mutable tag when digest resolution is unavailable.
+Run `docker buildx imagetools inspect` for the tested QAS, PanSou, aria2, sing-box and Playwright images, validate `sha256:` plus 64 lowercase hexadecimal characters, and commit `repository@sha256:digest` values. If resolution fails, the task fails; no mutable tag is committed.
 
-- [ ] **Step 3: Write failing renderer tests**
+- [ ] **Step 3: Write strict-renderer tests**
 
-Assert the rendered Compose contains no `latest`, binds management ports to `127.0.0.1`, mounts the host download directory to `/nas/downloads` for aria2, and references secret files without embedding their content.
+Assert Compose output contains no `latest`, binds management ports to `127.0.0.1`, mounts aria2 downloads at `/nas/downloads`, references secrets without embedding values and uses the shared `openclaw-media` network.
 
-- [ ] **Step 4: Implement strict Jinja rendering**
+- [ ] **Step 4: Implement rendering**
 
-Use `StrictUndefined`, autoescape disabled for config files, UTF-8 output, atomic writes, and file modes `0600` for rendered environment/config files and `0644` for non-secret Compose files.
+Use Jinja `StrictUndefined`, UTF-8, atomic writes, mode `0600` for generated config/environment files and `0644` for Compose files.
 
-- [ ] **Step 5: Render routing from configuration**
+- [ ] **Step 5: Render routing**
 
-The template must generate `movie`, `tv`, `drama`, `anime`, `documentary`, `show`, `other`, `downloads`, and `paths`; `tv.final_root` must equal `drama.final_root`; `protected_roots` must be the unique parents that cover every configured formal library.
+Generate `movie`, `tv`, `drama`, `anime`, `documentary`, `show`, `other`, `downloads` and `paths`. `tv.final_root` equals `drama.final_root`. Protected roots cover all formal libraries and exclude the download root.
 
-- [ ] **Step 6: Validate rendered files before planning them**
+- [ ] **Step 6: Validate rendered files before planning**
 
-Run `docker compose -f rendered-compose config --quiet` and `python3 -m json.tool rendered-routing.json`. A validation failure is blocking and no apply plan may be generated.
+Run Docker Compose config validation and `python3 -m json.tool` on generated routing. A failure is blocking and prevents plan generation.
 
 - [ ] **Step 7: Run tests and commit**
 
@@ -575,198 +583,260 @@ git commit -m "feat(deploy): lock images and render deterministic config"
 
 ---
 
-### Task 6: Implement QAS, PanSou, and aria2 discovery/reuse adapters
+### Task 7: Replace unconditional `0777` with a discovered aria2 permission strategy
 
 **Files:**
-- Create: `deploy/installer/adapters/__init__.py`
-- Create: `deploy/installer/adapters/qas_v1.py`
-- Create: `deploy/installer/adapters/pansou.py`
-- Create: `deploy/installer/adapters/aria2.py`
-- Create: `tests/deploy/test_qas_adapter.py`
-- Create: `tests/deploy/test_pansou_adapter.py`
-- Create: `tests/deploy/test_aria2_adapter.py`
-- Create: `tests/fixtures/qas-v1/config.json`
-- Create: `tests/fixtures/qas-v1/data-response.json`
-
-**Interfaces:**
-- Produces on every adapter: `discover(report, config)`, `plan(current, desired) -> list[Change]`, `verify(context) -> ComponentResult`
-- Produces: `Aria2Adapter.runtime_identity() -> RuntimeIdentity(uid: int, gid: int, groups: tuple[int, ...])`
-
-- [ ] **Step 1: Capture the pinned QAS fixture without guessing its schema**
-
-Start the exact digest chosen in Task 5 in an isolated temporary directory, create only dummy credentials, inspect `/app/config`, call `/data` with a dummy token, and save sanitized field structure under `tests/fixtures/qas-v1/`. Replace every credential value with `***` while preserving types and key names. Commit no Cookie, token, share URL, or private address.
-
-- [ ] **Step 2: Write QAS adapter tests from the captured fixture**
-
-Cover: configured WebUI credentials, API token state, Cookie presence/shape, aria2 plugin URL, RPC secret configured state, read-back verification, and unknown schema returning `manual_action_required` with `nextAction: complete_qas_configuration`.
-
-- [ ] **Step 3: Implement QAS configuration-first and API-second logic**
-
-The adapter may write only fields demonstrated by the pinned fixture. After a write it must restart QAS, call `/data`, and compare normalized states. Browser fallback is not silently invoked; when config/API initialization cannot complete, return a manual action containing the local WebUI URL and a checklist, then allow `apply --resume DEPLOYMENT_ID` after the user completes login.
-
-- [ ] **Step 4: Write PanSou adapter tests**
-
-Cover proxy modes `none`, `existing`, and `managed`; generated environment variables; channel list rendering; HTTP health; search API reachability; Telegram source count; and optional failure mapping to `degraded`.
-
-- [ ] **Step 5: Implement PanSou proxy environment mapping**
-
-- SOCKS5 URL: set `PROXY` only when supported by the pinned image contract.
-- HTTP proxy URL: set `HTTP_PROXY` and `HTTPS_PROXY` to the same secret reference.
-- `none`: set none of these variables.
-- Never include the proxy URL in plan/report JSON.
-
-- [ ] **Step 6: Write aria2 adapter tests**
-
-Cover container identity parsing, RPC authentication, download path mapping, a temporary write probe under `.incoming/.deploy-probe-<id>`, cleanup of only that probe, and rejection when the configured host mount does not map to `/nas/downloads`.
-
-- [ ] **Step 7: Implement aria2 identity and RPC checks**
-
-Use `docker exec CONTAINER id -u`, `id -g`, and `id -G`; use JSON-RPC `aria2.getVersion` with `token:<secret>`; do not submit a real download during component verification.
-
-- [ ] **Step 8: Run tests and commit**
-
-```bash
-python3 -m unittest tests.deploy.test_qas_adapter tests.deploy.test_pansou_adapter tests.deploy.test_aria2_adapter -v
-python3 -m unittest discover -s tests -v
-git add deploy/installer/adapters tests/deploy tests/fixtures/qas-v1
-git commit -m "feat(deploy): add dependency discovery and initialization adapters"
-```
-
----
-
-### Task 7: Implement existing OpenClaw integration through a generated Compose override
-
-**Files:**
-- Create: `deploy/installer/adapters/openclaw.py`
-- Create: `deploy/templates/compose.openclaw.override.yml.j2`
-- Create: `tests/deploy/test_openclaw_adapter.py`
-- Create: `tests/fixtures/docker/openclaw-compose.json`
-
-**Interfaces:**
-- Produces: `OpenClawInstallation`
-- Produces: `OpenClawAdapter.plan_override(...) -> list[Change]`
-- Produces: `OpenClawAdapter.compose_command(override_path: Path) -> list[str]`
-
-- [ ] **Step 1: Write failing tests for supported and unsupported installations**
-
-Supported fixture requirements:
-
-- Docker Compose labels expose project name, working directory, config files, and service name.
-- One workspace bind mount is identified.
-- The original Compose config can be rendered to JSON.
-
-Unsupported Docker run-only installations must return `manual_action_required` with `nextAction: convert_openclaw_to_compose_or_configure_manually`; the adapter must not rewrite an unknown container.
-
-- [ ] **Step 2: Implement workspace and Skill target resolution**
-
-Derive:
-
-```text
-host skill path = <workspace host>/skills/resource-download-agent
-container skill path = <workspace destination>/skills/resource-download-agent
-host state path = <workspace host>/data/resource-download-agent/state.db
-container state path = <workspace destination>/data/resource-download-agent/state.db
-```
-
-Do not accept a workspace mount that is read-only.
-
-- [ ] **Step 3: Render an override instead of modifying the original Compose file**
-
-The override must address the discovered service name and add:
-
-- the shared `openclaw-media` network;
-- the host download mount;
-- formal media library mounts;
-- generated Skill environment variables;
-- the fixed absolute `mediactl` path expected by the OpenClaw allowlist.
-
-The original Compose files remain untouched and are backed up only for audit.
-
-- [ ] **Step 4: Generate the exact Compose command**
-
-```python
-args = ["docker", "compose", "-p", project]
-for path in original_config_files:
-    args.extend(["-f", str(path)])
-args.extend(["-f", str(override_path), "up", "-d", service])
-```
-
-Reject missing original files or Compose config drift before execution.
-
-- [ ] **Step 5: Plan Skill installation safely**
-
-If the target does not exist, plan a copy from the current repository checkout excluding `.git`, `.deploy-venv`, `deploy/runtime`, `deploy/secrets`, and local `.env`. If it is a Git checkout with local modifications, return `manual_action_required`; never force reset. If it matches the current commit, plan no change.
-
-- [ ] **Step 6: Add OpenClaw readiness checks**
-
-Verify the container is healthy, the Skill directory is visible, `bin/mediactl` is executable, the generated environment is present without printing values, and the fixed CLI can execute `check-ready`.
-
-- [ ] **Step 7: Run tests and commit**
-
-```bash
-python3 -m unittest tests.deploy.test_openclaw_adapter -v
-python3 -m unittest discover -s tests -v
-git add deploy/installer/adapters/openclaw.py deploy/templates/compose.openclaw.override.yml.j2 tests/deploy tests/fixtures/docker
-git commit -m "feat(deploy): integrate existing OpenClaw with an override"
-```
-
----
-
-### Task 8: Replace unconditional world-writable download permissions with an explicit policy
-
-**Files:**
+- Create: `deploy/installer/permissions.py`
+- Create: `tests/deploy/test_permissions.py`
 - Modify: `scripts/download_fs.py`
 - Modify: `scripts/resource_agent.py`
 - Modify: `tests/test_download_fs.py`
-- Create: `deploy/installer/permissions.py`
-- Create: `tests/deploy/test_permissions.py`
 
 **Interfaces:**
-- Produces: `PermissionPlan(strategy, uid, gid, mode, acl_entries, changes)`
 - Produces: `choose_permission_plan(path_stat, aria_identity, acl_supported) -> PermissionPlan`
-- Produces in business code: `probe_writable(path: Path) -> bool`
+- Produces: `probe_writable(path: Path) -> bool`
 
-- [ ] **Step 1: Replace old tests that require `0777`**
+- [ ] **Step 1: Replace tests that require world-writable directories**
 
-Add tests for these ordered strategies:
+Test these ordered strategies:
 
-1. same UID, mode `0750` or stricter when writable;
-2. shared GID, mode `0770`;
-3. POSIX ACL grant to aria2 UID;
-4. fallback `0777` only for the downloads root and `.incoming`;
+1. same UID with the narrowest writable mode;
+2. shared GID with mode `0770`;
+3. POSIX ACL for the aria2 UID;
+4. mode `0777` only as a final fallback for downloads root and `.incoming`;
 5. `.ready` and `.quarantine` remain Agent-owned;
-6. formal libraries are never chmod targets.
+6. formal libraries are never permission-change targets.
 
-- [ ] **Step 2: Run the modified tests and observe failures**
+- [ ] **Step 2: Run tests and observe the expected failures**
 
 Run: `python3 -m unittest tests.test_download_fs tests.deploy.test_permissions -v`
 
-Expected: failures because current code always uses `ARIA2_DIR_MODE = 0o777`.
+Expected: current hard-coded `ARIA2_DIR_MODE = 0o777` causes failures.
 
 - [ ] **Step 3: Implement pure permission planning**
 
-`choose_permission_plan` must have no filesystem side effects. It returns exact `chown`, `chmod`, or `setfacl` changes for the deployment planner to display and confirm.
+Return explicit `set_owner`, `set_mode` and `set_acl` changes without mutating the filesystem. These changes are displayed in the deployment plan before confirmation.
 
-- [ ] **Step 4: Restrict business-code permission mutation**
+- [ ] **Step 4: Restrict business-code mutation**
 
-Change `ensure_aria2_writable` so it only creates managed directories and applies a mode supplied through `RESOURCE_AGENT_INCOMING_MODE`; default to `0770`, not `0777`. Existing installations requiring `0777` receive that value from the generated environment after deployment discovery.
+`ensure_aria2_writable` creates only managed download directories and applies `RESOURCE_AGENT_INCOMING_MODE`, defaulting to `0770`. The deployer sets `0777` only when discovery proved narrower strategies unusable.
 
 - [ ] **Step 5: Replace `is_world_writable` readiness logic**
 
-In `resource_agent.py`, readiness must create and delete a uniquely named zero-byte probe under `.incoming`, report a safe error if that fails, and never treat world writability itself as the requirement.
+Create and delete a unique zero-byte probe under `.incoming`. Effective write success is the requirement; world writability is not.
 
 - [ ] **Step 6: Run tests and commit**
 
 ```bash
 python3 -m unittest tests.test_download_fs tests.deploy.test_permissions -v
 python3 -m unittest discover -s tests -v
-git add scripts/download_fs.py scripts/resource_agent.py tests/test_download_fs.py deploy/installer/permissions.py tests/deploy/test_permissions.py
-git commit -m "fix(storage): use discovered aria2 permission strategy"
+git add deploy/installer/permissions.py scripts/download_fs.py scripts/resource_agent.py tests/test_download_fs.py tests/deploy/test_permissions.py
+git commit -m "fix(storage): use discovered aria2 permissions"
 ```
 
 ---
 
-### Task 9: Implement backup, transaction execution, resume, and rollback
+### Task 8: Implement QAS config/API initialization and Playwright fallback
+
+**Files:**
+- Create: `deploy/installer/adapters/qas_v1.py`
+- Create: `deploy/installer/adapters/qas_browser.py`
+- Create: `tests/deploy/test_qas_adapter.py`
+- Create: `tests/deploy/test_qas_browser.py`
+- Create: `tests/fixtures/qas-v1/config.json`
+- Create: `tests/fixtures/qas-v1/data-response.json`
+- Create: `tests/fixtures/qas-v1/ui-contract.json`
+
+**Interfaces:**
+- Produces: `QasV1Adapter.discover()`, `plan()`, `apply_config()`, `verify()`
+- Produces: `QasBrowserFallback.run(base_url, desired_state, runner) -> BrowserResult`
+
+- [ ] **Step 1: Capture sanitized fixtures from the exact locked QAS digest**
+
+Start the locked image in an isolated temporary directory using dummy values. Record config key names and types, `/data` response shape and stable UI selectors. Replace every credential, Cookie, share URL and address with `***` before committing fixtures.
+
+- [ ] **Step 2: Write config/API adapter tests**
+
+Cover WebUI username/password state, API token state, Cookie normalization, aria2 plugin URL, RPC secret state, read-back verification and unknown schema behavior. Unknown schema returns `manual_action_required` with `nextAction: complete_qas_configuration`.
+
+- [ ] **Step 3: Implement config-first and API-second initialization**
+
+Write only fields proven by the fixture. Back up before writing, restart QAS, call `/data`, normalize values and compare desired versus actual state. Reports use `configured`, `missing` and `invalid`, never secret values.
+
+- [ ] **Step 4: Write Playwright fallback tests**
+
+Use a local HTML fixture served by `http.server`. Assert the fallback fills only known non-auth fields, clicks the known save control, never logs form values and returns `manual_action_required` when login, QR or CAPTCHA UI is detected.
+
+- [ ] **Step 5: Implement the browser fallback in an ephemeral locked Playwright container**
+
+Bind-mount a generated automation script read-only, attach the container to `openclaw-media`, access QAS by service DNS and remove the container after execution. The browser is headless. It does not bypass identity challenges. When user login is required, return the local QAS WebUI URL and persist a resumable gate.
+
+- [ ] **Step 6: Add resume verification**
+
+After the user completes login or QR verification, `apply --resume DEPLOYMENT_ID --confirmed` reruns QAS read-back and continues only when Cookie, token and aria2 integration validate.
+
+- [ ] **Step 7: Run tests and commit**
+
+```bash
+python3 -m unittest tests.deploy.test_qas_adapter tests.deploy.test_qas_browser -v
+python3 -m unittest discover -s tests -v
+git add deploy/installer/adapters/qas_v1.py deploy/installer/adapters/qas_browser.py tests/deploy tests/fixtures/qas-v1
+git commit -m "feat(deploy): initialize QAS with browser fallback"
+```
+
+---
+
+### Task 9: Implement PanSou and optional managed proxy profiles
+
+**Files:**
+- Create: `deploy/installer/adapters/pansou.py`
+- Create: `deploy/installer/adapters/proxy.py`
+- Create: `deploy/templates/compose.proxy.yml.j2`
+- Create: `tests/deploy/test_pansou_adapter.py`
+- Create: `tests/deploy/test_proxy_adapter.py`
+
+**Interfaces:**
+- Produces: `PanSouAdapter.discover()`, `plan()`, `verify()`
+- Produces: `ProxyAdapter.plan()`, `verify()`
+
+- [ ] **Step 1: Write PanSou mode tests**
+
+Cover `none`, `existing` and `managed`; channel rendering; HTTP health; search API response; Telegram source count; and optional failure aggregation to `degraded`.
+
+- [ ] **Step 2: Implement existing-proxy mapping**
+
+SOCKS5 input maps to the pinned PanSou-supported proxy variable. HTTP input maps to `HTTP_PROXY` and `HTTPS_PROXY`. Proxy URLs are loaded from secret files at apply time and never written to plans or reports.
+
+- [ ] **Step 3: Write managed-proxy tests**
+
+Require a user-supplied `singbox_config.json` secret, mount it read-only, expose only an internal Docker-network SOCKS5 endpoint and reject configurations that bind management or proxy ports to public host interfaces.
+
+- [ ] **Step 4: Implement managed sing-box profile**
+
+The project supplies no proxy provider, account or node. The user supplies a legal, valid sing-box configuration. Unsupported subscription formats return `manual_action_required` with `nextAction: provide_singbox_config`.
+
+- [ ] **Step 5: Implement differentiated verification**
+
+Report `serviceHealthy`, `apiReachable`, `telegramReachable`, `proxyConfigured` and `sourceCount`. PanSou enabled but Telegram unreachable yields `degraded`, not `ready` and not a core-chain failure.
+
+- [ ] **Step 6: Run tests and commit**
+
+```bash
+python3 -m unittest tests.deploy.test_pansou_adapter tests.deploy.test_proxy_adapter -v
+python3 -m unittest discover -s tests -v
+git add deploy/installer/adapters/pansou.py deploy/installer/adapters/proxy.py deploy/templates/compose.proxy.yml.j2 tests/deploy
+git commit -m "feat(deploy): add PanSou and managed proxy profiles"
+```
+
+---
+
+### Task 10: Implement aria2 reuse, identity, RPC and mount verification
+
+**Files:**
+- Create: `deploy/installer/adapters/aria2.py`
+- Create: `tests/deploy/test_aria2_adapter.py`
+
+**Interfaces:**
+- Produces: `Aria2Adapter.runtime_identity() -> RuntimeIdentity`
+- Produces: `Aria2Adapter.verify_rpc() -> ComponentResult`
+- Produces: `Aria2Adapter.verify_mount() -> ComponentResult`
+
+- [ ] **Step 1: Write identity and mount tests**
+
+Cover `id -u`, `id -g`, `id -G`, `/nas/downloads` mount source, RPC authentication and rejection when the OpenClaw-visible host source differs from the aria2 mount source.
+
+- [ ] **Step 2: Implement identity discovery**
+
+Use:
+
+```python
+runner.run(["docker", "exec", container_name, "id", "-u"])
+runner.run(["docker", "exec", container_name, "id", "-g"])
+runner.run(["docker", "exec", container_name, "id", "-G"])
+```
+
+- [ ] **Step 3: Implement authenticated RPC verification**
+
+Call `aria2.getVersion` with `token:` plus the secret. Redact the secret from URL, request and exception output.
+
+- [ ] **Step 4: Implement a controlled write probe**
+
+Create `.incoming/.deploy-probe-{deployment_id}`, ask aria2 to write a tiny configured legal probe object, confirm host visibility and remove only the probe GID and probe files. A failed probe reports exact mapping metadata without leaking internal credentials.
+
+- [ ] **Step 5: Run tests and commit**
+
+```bash
+python3 -m unittest tests.deploy.test_aria2_adapter -v
+python3 -m unittest discover -s tests -v
+git add deploy/installer/adapters/aria2.py tests/deploy/test_aria2_adapter.py
+git commit -m "feat(deploy): verify aria2 identity RPC and mounts"
+```
+
+---
+
+### Task 11: Integrate the existing OpenClaw service and enforce its command allowlist
+
+**Files:**
+- Create: `deploy/installer/adapters/openclaw_v1.py`
+- Create: `deploy/templates/compose.openclaw.override.yml.j2`
+- Create: `tests/deploy/test_openclaw_adapter.py`
+- Create: `tests/fixtures/openclaw-v1/config.json`
+- Create: `tests/fixtures/openclaw-v1/compose.json`
+- Create: `tests/fixtures/openclaw-v1/version.txt`
+
+**Interfaces:**
+- Produces: `OpenClawV1Adapter.discover()`, `plan()`, `apply_config()`, `verify()`
+- Produces: `compose_command(installation, override_path) -> list[str]`
+
+- [ ] **Step 1: Capture a sanitized supported OpenClaw profile**
+
+From the exact tested OpenClaw version, record version output, Compose JSON, workspace mount, `skills.entries.resource-download-agent.env` shape and `tools.exec` configuration shape. Remove all credentials and private addresses.
+
+- [ ] **Step 2: Write supported and unsupported profile tests**
+
+A supported Compose-managed installation resolves one writable workspace. Docker-run-only or unknown config profiles return `manual_action_required`; the adapter never guesses or rewrites an unknown container.
+
+- [ ] **Step 3: Resolve concrete Skill paths**
+
+```python
+host_skill_path = workspace.host_source / "skills" / "resource-download-agent"
+container_skill_path = workspace.container_destination / "skills" / "resource-download-agent"
+host_state_path = workspace.host_source / "data" / "resource-download-agent" / "state.db"
+container_state_path = workspace.container_destination / "data" / "resource-download-agent" / "state.db"
+```
+
+- [ ] **Step 4: Render a Compose override without modifying original Compose files**
+
+Add the shared network, download mount, formal media mounts and non-secret environment references to the discovered service. Build the command by appending every discovered original `-f` file followed by the generated override and `up -d SERVICE_NAME`.
+
+- [ ] **Step 5: Implement safe Skill installation/update**
+
+Copy the current repository checkout excluding `.git`, `.deploy-venv`, `deploy/runtime`, `deploy/secrets` and local `.env`. Existing Git checkout with local modifications returns `manual_action_required`; never force reset.
+
+- [ ] **Step 6: Write allowlist security tests**
+
+Assert the generated OpenClaw configuration sets `tools.exec.security` to `allowlist`, sets `tools.exec.ask` to `off`, and permits only the fixed absolute `bin/mediactl` path. Assert `bash`, `sh`, `python`, `curl`, `rm` and `sudo` are absent.
+
+- [ ] **Step 7: Implement supported-profile configuration merge**
+
+Back up `openclaw.json`, merge Skill environment references and the fixed exec policy, write atomically, restart through Compose and read the file back. Unsupported `tools.exec` shape returns `manual_action_required` rather than overwriting it.
+
+- [ ] **Step 8: Verify OpenClaw**
+
+Check container health, Skill visibility, executable mode, effective fixed command policy and `mediactl check-ready` JSON.
+
+- [ ] **Step 9: Run tests and commit**
+
+```bash
+python3 -m unittest tests.deploy.test_openclaw_adapter -v
+python3 -m unittest discover -s tests -v
+git add deploy/installer/adapters/openclaw_v1.py deploy/templates/compose.openclaw.override.yml.j2 tests/deploy tests/fixtures/openclaw-v1
+git commit -m "feat(deploy): integrate and constrain existing OpenClaw"
+```
+
+---
+
+### Task 12: Implement secret-free backup, journaled apply, resume and rollback
 
 **Files:**
 - Create: `deploy/installer/backup.py`
@@ -775,28 +845,29 @@ git commit -m "fix(storage): use discovered aria2 permission strategy"
 - Create: `tests/deploy/test_backup.py`
 - Create: `tests/deploy/test_executor.py`
 - Create: `tests/deploy/test_rollback.py`
+- Modify: `deploy/installer/cli.py`
 
 **Interfaces:**
-- Produces: `BackupManifest`
-- Produces: `ExecutionJournal`
+- Produces: `create_backup(...) -> BackupManifest`
 - Produces: `apply_plan(plan, context) -> DeploymentResult`
+- Produces: `resume_deployment(deployment_id, context) -> DeploymentResult`
 - Produces: `rollback(deployment_id, context) -> DeploymentResult`
 
 - [ ] **Step 1: Write backup exclusion tests**
 
-Assert that secrets, `.env`, storage-state files, and files matching configured secret values are rejected from backup. Ordinary Compose, routing, OpenClaw config, Skill source, and state database files are copied with metadata.
+Secrets, `.env`, storage-state files and files containing a configured secret sentinel are rejected. Compose, routing, supported OpenClaw config, Skill source and the state database are copied with metadata.
 
-- [ ] **Step 2: Implement backups**
+- [ ] **Step 2: Implement backups under `RuntimePaths.backup_dir(deployment_id)`**
 
-Backups live under `deploy/runtime/backups/<deployment-id>/`. Each item records source, backup relative path, mode, owner IDs, SHA-256, and restore behavior. Symlinks are recorded as symlinks and must not be followed outside the allowed roots.
+Record source, backup relative path, mode, owner IDs, SHA-256 and restore action. Preserve symlinks as symlinks and reject links escaping allowed roots.
 
 - [ ] **Step 3: Write transaction failure tests**
 
-Create fake changes A, B, C where C fails. Assert A and B reverse in reverse order, the journal records every attempted action, and final state is `rolled_back`. If rollback B fails, final state is `failed` with both the original and rollback errors preserved.
+Use changes A, B and C where C fails. Assert B and A reverse in that order and final status is `rolled_back`. If rollback B fails, final status is `failed` with both original and rollback errors.
 
-- [ ] **Step 4: Implement change handlers**
+- [ ] **Step 4: Implement explicit change handlers**
 
-Support explicit handlers only:
+Support only:
 
 ```text
 create_directory
@@ -810,18 +881,19 @@ connect_network
 compose_up
 restart_container
 http_config_update
+run_browser_fallback
 run_verification
 ```
 
-Unknown action types are a blocking error before any side effect.
+Unknown action types are rejected before any side effect.
 
 - [ ] **Step 5: Implement resumable manual gates**
 
-When QAS requires login/configuration, persist the journal with state `manual_action_required`. `apply --resume DEPLOYMENT_ID --confirmed` re-runs drift checks and resumes at the first unapplied change; it must not repeat completed non-idempotent actions.
+Persist completed change IDs. `apply --resume DEPLOYMENT_ID --confirmed` reruns drift checks and continues at the first unapplied change without repeating completed non-idempotent actions.
 
-- [ ] **Step 6: Wire CLI `apply` and `rollback`**
+- [ ] **Step 6: Wire `apply` and `rollback`**
 
-`apply` validates the plan, creates backups, executes, automatically runs `verify safe`, and returns the final structured state. `rollback` requires `--confirmed` and refuses a deployment ID that does not belong to the current project directory.
+`apply` validates the plan, backs up, executes and automatically runs `verify safe`. `rollback` requires `--confirmed` and rejects deployment IDs from another project root.
 
 - [ ] **Step 7: Run tests and commit**
 
@@ -834,45 +906,44 @@ git commit -m "feat(deploy): add transactional apply and rollback"
 
 ---
 
-### Task 10: Implement L0-L4 component and security verification
+### Task 13: Implement L0-L4 component and security verification
 
 **Files:**
 - Create: `deploy/installer/verifier.py`
 - Create: `tests/deploy/test_verifier.py`
 
 **Interfaces:**
-- Produces: `VerificationResult(level, status, components, checks, next_action)`
 - Produces: `verify(level: str, context) -> VerificationResult`
 
-- [ ] **Step 1: Write failing state-aggregation tests**
+- [ ] **Step 1: Write state aggregation tests**
 
 Rules:
 
-- any `security_block` or required component failure => `failed`;
-- required manual gate => `manual_action_required`;
-- optional PanSou failure => `degraded`;
-- all enabled checks pass => `ready`;
-- a disabled optional component is `skipped`, not `failed`.
+- any `security_block` or required component failure yields `failed`;
+- a required user gate yields `manual_action_required`;
+- optional PanSou/proxy failure yields `degraded`;
+- all enabled checks passing yields `ready`;
+- a disabled optional component is `skipped`.
 
 - [ ] **Step 2: Implement L0 static checks**
 
-Validate schema, secrets permissions, immutable images, rendered Compose, JSON routing, port conflicts, real host paths, free space, architecture, protected-root coverage, and that no formal library equals or sits inside the download root.
+Validate schema, secret modes, immutable images, rendered Compose/JSON, ports, real paths, free space, architecture, protected-root coverage and formal-library separation from downloads.
 
 - [ ] **Step 3: Implement L1 health checks**
 
-Use Docker health status when defined. When an image lacks a healthcheck, run the adapter's explicit API probe and report `healthSource: adapter_probe`; do not treat `docker ps` running state alone as healthy.
+Use Docker health status when defined. Otherwise use an adapter API probe and report `healthSource: adapter_probe`; running container state alone is insufficient.
 
 - [ ] **Step 4: Implement L2 network checks**
 
-Run probes from the OpenClaw container to QAS, PanSou, aria2 RPC, and DNS names. Use a fixed Python one-liner only inside the deployment verifier, not the OpenClaw allowlist exposed to the Agent.
+Probe OpenClaw to QAS, PanSou and aria2 by Docker DNS. The verifier may run a fixed internal Python probe through `docker exec`; that probe is not added to the Agent-facing allowlist.
 
 - [ ] **Step 5: Implement L3 component checks**
 
-Verify QAS token/Cookie/plugin state, PanSou Telegram-source behavior, aria2 authenticated RPC and write probe, Skill presence, and `mediactl check-ready` JSON.
+Verify QAS token/Cookie/plugin read-back, PanSou Telegram source behavior, proxy reachability, aria2 RPC/write mapping, OpenClaw Skill visibility and `mediactl check-ready`.
 
 - [ ] **Step 6: Implement L4 security checks**
 
-Verify formal media roots are not direct download targets, generated OpenClaw command policy names only the fixed absolute `mediactl`, secret values are absent from all reports, expired plans are rejected, and protected-root deletion tests from the existing suite pass.
+Verify formal libraries are not download targets, allowlist contains only fixed `mediactl`, report files contain no secret sentinels, expired plans fail and a fixed `mediactl` protected-path operation is refused. Production verification does not execute the unit test suite.
 
 - [ ] **Step 7: Run tests and commit**
 
@@ -880,12 +951,12 @@ Verify formal media roots are not direct download targets, generated OpenClaw co
 python3 -m unittest tests.deploy.test_verifier -v
 python3 -m unittest discover -s tests -v
 git add deploy/installer/verifier.py tests/deploy/test_verifier.py
-git commit -m "feat(deploy): add layered component and security verification"
+git commit -m "feat(deploy): add layered security verification"
 ```
 
 ---
 
-### Task 11: Implement `safe` and user-confirmed `full` business verification
+### Task 14: Implement `safe` and confirmed `full` business verification
 
 **Files:**
 - Modify: `deploy/installer/verifier.py`
@@ -897,54 +968,46 @@ git commit -m "feat(deploy): add layered component and security verification"
 - Produces: `verify_safe(context) -> VerificationResult`
 - Produces: `verify_full(context) -> VerificationResult`
 
-- [ ] **Step 1: Write safe-verification tests**
+- [ ] **Step 1: Write concrete safe-flow tests**
 
-Use a fake `mediactl` responder and assert the sequence:
+Use these fixture calls:
 
 ```text
 check-ready
-search <configured safe query> --media-type other
-preview <candidateId>
-tree <candidateId>
-plan download <candidateId> --node <nodeId> --media-type other
+search OpenClaw deploy verification sample --media-type other
+preview candidate-demo
+ tree candidate-demo
+plan download candidate-demo --node node-demo --media-type other
 ```
 
-Assert no `execute` or `organize execute` call occurs and no `.incoming` task directory remains.
+The leading whitespace before `tree` is not part of the argv. Assert no `execute` and no `organize execute` call occurs, and no real download task is created.
 
 - [ ] **Step 2: Implement safe verification**
 
-Prefer a user-provided legal share URL when search sources are unstable; otherwise use the configured harmless query. The verifier must parse only JSON fields `ok`, `status`, `nextAction`, `data`, `warnings`, and `errors` and reject extra terminal prose.
+Search may be replaced by a user-provided legal share URL when remote search is unstable. Parse only JSON fields `ok`, `terminal`, `nextAction`, `data`, `warnings`, `errors` and `error`. Reject extra terminal prose.
 
-- [ ] **Step 3: Write full-verification gating tests**
+- [ ] **Step 3: Write full-flow gate tests**
 
-Test all three required gates independently:
+Independently require `allow_real_download`, `full_test_share_url` secret and CLI `--confirmed`. Missing gates return `manual_action_required`.
 
-1. `allow_real_download` must be true;
-2. `full_test_share_url` secret must exist and be a supported Quark URL;
-3. CLI must include `--confirmed`.
-
-Each missing gate returns `manual_action_required`, not `failed`.
-
-- [ ] **Step 4: Implement full verification sequence**
-
-Run:
+- [ ] **Step 4: Implement the existing CLI syntax exactly**
 
 ```text
-import/preview legal share
-select configured small node
-plan download
-execute plan --confirmed
-poll downloads show until terminal or timeout
-downloads validate
-organize plan
+import-url LEGAL_SHARE_URL --media-type other
+tree CANDIDATE_ID
+plan download CANDIDATE_ID --node NODE_ID --media-type other
+execute PLAN_ID --confirmed
+downloads show TASK_ID
+downloads validate TASK_ID
+organize plan TASK_ID
 stop
 ```
 
-Record task IDs and generated paths. Never call `organize execute`. On timeout, leave downloaded files in place and report their exact redacted managed path for manual cleanup.
+Select a node only when its reported size is within the configured test limit. Never run `organize execute`.
 
-- [ ] **Step 5: Add test cleanup boundaries**
+- [ ] **Step 5: Implement failure boundaries**
 
-The verifier may remove only its own `.deploy-probe-*` files. It must not automatically delete real downloaded content, even after a failed full verification.
+On timeout or validation failure, leave real downloaded content in place, report the managed path and remove only `.deploy-probe-*` artifacts.
 
 - [ ] **Step 6: Run tests and commit**
 
@@ -957,56 +1020,14 @@ git commit -m "feat(deploy): add safe and confirmed full verification"
 
 ---
 
-### Task 12: Complete the interactive initializer and end-to-end CLI contract
+### Task 15: Complete the initializer, end-to-end CLI, docs and CI
 
 **Files:**
 - Modify: `deploy/installer/cli.py`
 - Modify: `deploy/config.example.yaml`
-- Create: `tests/deploy/test_init_wizard.py`
-- Create: `tests/deploy/test_cli_end_to_end.py`
-
-**Interfaces:**
-- Produces: `run_init(input_stream, output_stream, project_root) -> DeploymentConfig`
-
-- [ ] **Step 1: Write initializer transcript tests**
-
-Test a complete noninteractive transcript that chooses UGOS, supplies project/download/library paths, selects service reuse mode `auto`, enables PanSou with an existing proxy, and creates named empty secret files. Assert the initializer never asks for or echoes secret values.
-
-- [ ] **Step 2: Implement the wizard as a config generator only**
-
-It writes `deploy/config.yaml`, creates `deploy/secrets/` as `0700`, creates missing secret files as empty `0600`, and returns `nextAction: fill_secret_files_then_run_discover`. It must not run Docker discovery or apply changes.
-
-- [ ] **Step 3: Implement noninteractive overrides for Agents**
-
-Support:
-
-```bash
-python3 deploy/cli.py init --non-interactive --config-source /path/input.yaml
-```
-
-The source is schema-validated and copied atomically; it cannot point inside `deploy/secrets/` or be a symlink escaping the project root.
-
-- [ ] **Step 4: Add an end-to-end fake-runner test**
-
-Exercise `init -> discover -> plan -> apply -> verify safe -> rollback` using fixture Docker responses and temporary directories. Assert every command emits one JSON document and secrets are absent from captured stdout/stderr/runtime reports.
-
-- [ ] **Step 5: Run tests and commit**
-
-```bash
-python3 -m unittest tests.deploy.test_init_wizard tests.deploy.test_cli_end_to_end -v
-python3 -m unittest discover -s tests -v
-git add deploy/installer/cli.py deploy/config.example.yaml tests/deploy
-git commit -m "feat(deploy): complete initializer and CLI workflow"
-```
-
----
-
-### Task 13: Update documentation, reference Compose, and CI
-
-**Files:**
+- Modify: `deploy/docker-compose.dependencies.yml`
 - Modify: `README.md`
 - Modify: `docs/AGENT_DEPLOY.md`
-- Modify: `deploy/docker-compose.dependencies.yml`
 - Create: `docs/deployment/QUICKSTART.md`
 - Create: `docs/deployment/EXISTING_OPENCLAW.md`
 - Create: `docs/deployment/QAS_LOGIN.md`
@@ -1014,18 +1035,40 @@ git commit -m "feat(deploy): complete initializer and CLI workflow"
 - Create: `docs/deployment/TROUBLESHOOTING.md`
 - Create: `docs/deployment/SECURITY.md`
 - Create: `.github/workflows/deploy-tests.yml`
+- Create: `tests/deploy/test_init_wizard.py`
+- Create: `tests/deploy/test_cli_end_to_end.py`
 - Create: `tests/deploy/test_docs_examples.py`
 
 **Interfaces:**
-- Documentation commands must match the CLI parser exactly.
+- Produces: `run_init(input_stream, output_stream, project_root) -> DeploymentConfig`
 
-- [ ] **Step 1: Write command-example tests before changing docs**
+- [ ] **Step 1: Write initializer transcript tests**
 
-Extract fenced commands beginning with `python3 deploy/cli.py` from README and deployment docs, parse them with the real CLI parser, and fail on unknown flags or commands.
+Choose UGOS, provide project/download/library paths, use service mode `auto`, enable PanSou with existing proxy and create named empty secret files. Assert the wizard never asks for or echoes secret values.
 
-- [ ] **Step 2: Replace the README deployment prompt with the deterministic flow**
+- [ ] **Step 2: Implement `init` as configuration generation only**
 
-Primary path:
+Write `deploy/config.yaml`, create `deploy/secrets/` as `0700`, create missing secret files as empty `0600`, and return `nextAction: fill_secret_files_then_run_discover`. Do not call Docker.
+
+- [ ] **Step 3: Add an Agent-friendly noninteractive mode**
+
+```bash
+python3 deploy/cli.py init --non-interactive --config-source /tmp/openclaw-media-config.yaml
+```
+
+Validate schema before atomic copy. Reject a source under `deploy/secrets/` and symlinks escaping the project root.
+
+- [ ] **Step 4: Write fixture end-to-end tests**
+
+Exercise `init`, `discover`, `plan`, `apply`, `verify safe` and `rollback`. Every command emits one JSON document and no secret sentinel appears in stdout, stderr or runtime reports.
+
+- [ ] **Step 5: Test documentation commands against the real parser**
+
+Extract fenced `python3 deploy/cli.py` commands and reject unknown commands or flags.
+
+- [ ] **Step 6: Update the user and Agent documentation**
+
+Primary flow:
 
 ```bash
 git clone https://github.com/Inupedia/openclaw-nas-media-agent.git
@@ -1037,113 +1080,87 @@ python3 deploy/cli.py apply --plan-id PLAN_ID --confirmed
 python3 deploy/cli.py verify --level safe
 ```
 
-State plainly that login/captcha and dangerous-operation confirmations remain user actions.
+State that login, QR, CAPTCHA and dangerous-operation confirmation remain user actions.
 
-- [ ] **Step 3: Rewrite `docs/AGENT_DEPLOY.md` as an execution contract**
+- [ ] **Step 7: Make the committed dependency Compose a checked generated reference**
 
-The Agent must read structured JSON, show `changes`, request confirmation only when `nextAction` requires it, and never edit Compose/routing/QAS configuration manually when the deployer supports the operation.
+Render it from the same template and version lock in tests. It contains immutable image references and no secret values.
 
-- [ ] **Step 4: Convert the old Compose file into a checked reference**
+- [ ] **Step 8: Add CI for Python 3.10, 3.11 and 3.12**
 
-Generate it from the same version lock/template during tests, or add a header stating it is generated and a test comparing normalized Compose output. It must contain immutable image references and no real secrets.
+Install with `--require-hashes`, run `python -m unittest discover -s tests -v`, validate committed JSON/YAML and run the docs command test. CI uses fixtures only.
 
-- [ ] **Step 5: Add CI**
-
-Workflow requirements:
-
-```yaml
-on:
-  pull_request:
-  push:
-    branches: [main]
-jobs:
-  test:
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-```
-
-Install `deploy/requirements.lock`, run `python -m unittest discover -s tests -v`, and run static parsing of every committed YAML/JSON file. CI uses fixtures only and never requires real accounts.
-
-- [ ] **Step 6: Run all verification commands**
+- [ ] **Step 9: Run tests and commit**
 
 ```bash
+python3 -m unittest tests.deploy.test_init_wizard tests.deploy.test_cli_end_to_end tests.deploy.test_docs_examples -v
 python3 -m unittest discover -s tests -v
-python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
-python3 -m json.tool config/routing.json >/dev/null
-python3 deploy/cli.py --help >/tmp/deploy-help.json
-```
-
-Expected: tests pass; JSON parsing succeeds; CLI help follows the single-JSON contract.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add README.md docs deploy/docker-compose.dependencies.yml .github/workflows tests/deploy/test_docs_examples.py
-git commit -m "docs(deploy): publish existing OpenClaw quickstart and CI"
+git add deploy README.md docs .github/workflows tests/deploy
+git commit -m "docs(deploy): publish deterministic existing OpenClaw workflow"
 ```
 
 ---
 
-### Task 14: Perform final scenario verification and prepare the implementation branch for review
+### Task 16: Perform final scenario verification and prepare for review
 
 **Files:**
-- Modify only files required to fix failures discovered by the commands below.
+- Modify only files required by verified failures from the commands below.
 
-- [ ] **Step 1: Run the full unit suite from a clean process**
+- [ ] **Step 1: Run the full suite in a clean process**
 
 Run: `python3 -m unittest discover -s tests -v`
 
-Expected: zero failures and zero errors. Skips are acceptable only for existing platform-specific symlink tests with an explicit reason.
+Expected: zero failures and zero errors. Existing platform-specific skips require explicit reasons.
 
 - [ ] **Step 2: Run fixture end-to-end verification**
 
 Run: `python3 -m unittest tests.deploy.test_cli_end_to_end -v`
 
-Expected: the fake deployment reaches `ready`, then rollback reaches `rolled_back`, and no secret sentinel appears in captured artifacts.
+Expected: fake apply reaches `ready`, rollback reaches `rolled_back`, and no secret sentinel appears in artifacts.
 
-- [ ] **Step 3: Verify plan coverage against the approved design**
-
-Check and record evidence for: two-stage confirmation, config source of truth, secret modes, version immutability, QAS read-back, PanSou degraded state, aria2 identity/write probe, OpenClaw override, safe verification, full verification gates, transaction rollback, and protected media roots.
-
-- [ ] **Step 4: Inspect repository changes**
+- [ ] **Step 3: Run static checks**
 
 ```bash
-git status --short
+python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
+python3 -m json.tool config/routing.json >/dev/null
 git diff --check
-git log --oneline --decorate -15
+git status --short
 ```
 
-Expected: no untracked secret/runtime files, no whitespace errors, and one focused commit per completed task.
+Expected: no parsing errors, whitespace errors or untracked secret/runtime files.
 
-- [ ] **Step 5: Run a real UGOS or standard Linux dry run without applying**
+- [ ] **Step 4: Check approved-design coverage**
+
+Record evidence for config source of truth, secret modes, 30-minute plans, immutable images, QAS config/API/browser fallback, PanSou degraded state, managed proxy, aria2 identity and permission strategy, OpenClaw allowlist, safe/full gates, transaction rollback and protected media roots.
+
+- [ ] **Step 5: Run a real read-only UGOS or Linux dry run**
 
 ```bash
 python3 deploy/cli.py discover
 python3 deploy/cli.py plan
 ```
 
-Expected: discovery and plan succeed or return a precise `manual_action_required`; no files outside `deploy/runtime/` are changed and no Docker object is created.
+Expected: success or a precise `manual_action_required`; no Docker object is created and no file outside `deploy/runtime/` changes.
 
-- [ ] **Step 6: Run a controlled real `apply` and `verify safe`**
+- [ ] **Step 6: Run controlled apply, safe verification and rollback**
 
-Use a dedicated test OpenClaw/QAS/PanSou/aria2 environment and non-production directories. Confirm the plan, apply it, run safe verification, then rollback and compare backed-up configuration hashes.
+Use a dedicated non-production OpenClaw/QAS/PanSou/aria2 environment and non-production paths. Confirm the plan, apply, verify safe, rollback and compare backup hashes.
 
-- [ ] **Step 7: Commit verification-only fixes, if any**
+- [ ] **Step 7: Commit only verified fixes when files changed**
 
 ```bash
-git add <only-files-changed-by-verified-fixes>
+git add -u
 git commit -m "fix(deploy): address end-to-end verification findings"
 ```
 
-Do not create an empty commit when no fixes were needed.
+Skip the commit when `git status --short` is empty.
 
 ## Follow-on Plans
 
-After this plan is implemented and reviewed, write separate implementation plans in this order:
+After this plan is implemented and reviewed, create separate plans in this order:
 
-1. `2026-07-20-jiaofu-runner.md` — isolated Playwright/Chromium service, login-state lifecycle, HTTP API, and `mediactl` migration.
-2. `2026-07-20-full-stack-openclaw.md` — blank-NAS Compose, OpenAI-Compatible model setup, and Web/local chat entry.
-3. `2026-07-20-deployer-upgrades-and-platforms.md` — explicit version upgrades, Installer container entry, and additional NAS platform adapters.
+1. `2026-07-20-jiaofu-runner.md` — isolated Playwright/Chromium discovery service and login-state lifecycle.
+2. `2026-07-20-full-stack-openclaw.md` — blank-NAS OpenClaw Compose, OpenAI-Compatible model setup and Web/local chat.
+3. `2026-07-20-deployer-upgrades-and-platforms.md` — explicit upgrades, Installer-container entry and additional NAS adapters.
 
-Each follow-on plan must preserve the interfaces and state contracts established here rather than creating a second deployment path.
+Each follow-on plan reuses the interfaces and state contracts established here rather than creating a second deployment system.
