@@ -9,7 +9,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   baseline:
@@ -67,32 +67,3 @@ jobs:
           path: /tmp/source-snapshot.tar.gz
           if-no-files-found: error
           retention-days: 1
-
-  apply-task7-resource-agent-patch:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: feat/existing-openclaw-deployer
-      - name: Apply patch when present
-        id: patch
-        shell: bash
-        run: |
-          if [ ! -f .github/task7-resource-agent.patch ]; then
-            echo "applied=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git apply --check .github/task7-resource-agent.patch
-          git apply .github/task7-resource-agent.patch
-          rm .github/task7-resource-agent.patch
-          echo "applied=true" >> "$GITHUB_OUTPUT"
-      - name: Commit patched source
-        if: steps.patch.outputs.applied == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add scripts/resource_agent.py .github/task7-resource-agent.patch
-          git commit -m "fix(storage): verify effective staging writes"
-          git push origin HEAD:feat/existing-openclaw-deployer
