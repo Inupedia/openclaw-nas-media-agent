@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from deploy.installer.cli import run_discover, run_plan
+from deploy.installer.command import CommandResult
 from deploy.installer.config import load_config
 from deploy.installer.discovery import discover
 from deploy.installer.errors import DeploymentError
@@ -37,6 +38,19 @@ def sample_change(
     )
 
 
+class InvalidComposeRunner(FixtureRunner):
+    def run(self, args, timeout=30):
+        key = tuple(args)
+        if (
+            len(key) == 7
+            and key[:3] == ("docker", "compose", "-f")
+            and key[-2:] == ("config", "--quiet")
+        ):
+            self.calls.append(key)
+            return CommandResult(key, 1, "", "invalid compose")
+        return super().run(args, timeout=timeout)
+
+
 class PlanTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -46,6 +60,11 @@ class PlanTests(unittest.TestCase):
         config_path = deploy_dir / "config.yaml"
         config_path.write_text(
             yaml.safe_dump(minimal_config(), allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        repository_versions = Path(__file__).resolve().parents[2] / "deploy" / "versions.yaml"
+        (deploy_dir / "versions.yaml").write_text(
+            repository_versions.read_text(encoding="utf-8"),
             encoding="utf-8",
         )
         self.config = load_config(config_path)
@@ -137,6 +156,18 @@ class PlanTests(unittest.TestCase):
         self.assertNotIn("token-123", content)
         self.assertNotIn("token-123", json.dumps(plan_payload))
         self.assertEqual(json.loads(content)["expiresAt"], 2800)
+        self.assertTrue((self.project / "deploy/runtime/rendered/compose.dependencies.yml").is_file())
+        self.assertTrue((self.project / "deploy/runtime/rendered/routing.json").is_file())
+
+    def test_invalid_rendered_compose_prevents_plan_file(self):
+        with self.assertRaises(DeploymentError) as ctx:
+            run_plan(
+                self.project,
+                runner=InvalidComposeRunner(),
+                now=1000,
+            )
+        self.assertEqual(ctx.exception.code, "COMPOSE_VALIDATION_FAILED")
+        self.assertFalse((self.project / "deploy/runtime/plan.json").exists())
 
 
 if __name__ == "__main__":
