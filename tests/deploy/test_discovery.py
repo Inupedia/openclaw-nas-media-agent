@@ -69,6 +69,14 @@ class FixtureRunner:
             "json",
         ):
             return CommandResult(key, 0, json.dumps(self.compose), "")
+        if (
+            len(key) == 7
+            and key[:3] == ("docker", "compose", "-f")
+            and key[-2:] == ("config", "--quiet")
+        ):
+            return CommandResult(key, 0, "", "")
+        if len(key) == 4 and key[1:3] == ("-m", "json.tool"):
+            return CommandResult(key, 0, "", "")
         if len(key) == 4 and key[:3] == ("stat", "-c", "%a:%u:%g:%F"):
             return CommandResult(key, 0, "755:1000:1000:directory\n", "")
         if len(key) == 3 and key[:2] == ("df", "-P"):
