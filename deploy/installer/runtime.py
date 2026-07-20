@@ -48,6 +48,7 @@ def _ensure_private_directory(path: Path) -> Path:
 class RuntimePaths:
     project_root: Path
     root: Path
+    rendered_dir: Path
     reports_dir: Path
     backups_dir: Path
     journals_dir: Path
@@ -69,12 +70,14 @@ class RuntimePaths:
                 next_action="run_from_repository_root",
             )
         root = _ensure_private_directory(deploy_dir / "runtime")
+        rendered = _ensure_private_directory(root / "rendered")
         reports = _ensure_private_directory(root / "reports")
         backups = _ensure_private_directory(root / "backups")
         journals = _ensure_private_directory(root / "journals")
         return cls(
             project_root=project,
             root=root,
+            rendered_dir=rendered,
             reports_dir=reports,
             backups_dir=backups,
             journals_dir=journals,
