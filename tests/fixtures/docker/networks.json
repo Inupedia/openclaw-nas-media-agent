@@ -1,0 +1,14 @@
+[
+  {
+    "ID": "aaaaaaaaaaaa",
+    "Name": "bridge",
+    "Driver": "bridge",
+    "Scope": "local"
+  },
+  {
+    "ID": "bbbbbbbbbbbb",
+    "Name": "openclaw_default",
+    "Driver": "bridge",
+    "Scope": "local"
+  }
+]
