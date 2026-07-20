@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/images/readme-banner.svg" alt="OpenClaw NAS Media Agent" width="100%" />
+  <img
+    src="./docs/images/readme-banner.png"
+    alt="OpenClaw NAS Media Agent"
+    width="100%"
+  />
 </p>
 
 # OpenClaw NAS Media Agent
