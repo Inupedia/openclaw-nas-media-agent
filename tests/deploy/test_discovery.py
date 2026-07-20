@@ -15,6 +15,14 @@ from .test_config import minimal_config
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "docker"
+_VALIDATION_PREFIX = (
+    "env",
+    "QAS_WEBUI_PASSWORD=__OPENCLAW_VALIDATION_ONLY__",
+    "ARIA2_RPC_SECRET=__OPENCLAW_VALIDATION_ONLY__",
+    "docker",
+    "compose",
+    "-f",
+)
 
 
 def json_lines(value: list[dict]) -> str:
@@ -70,8 +78,8 @@ class FixtureRunner:
         ):
             return CommandResult(key, 0, json.dumps(self.compose), "")
         if (
-            len(key) == 6
-            and key[:3] == ("docker", "compose", "-f")
+            len(key) == 9
+            and key[:6] == _VALIDATION_PREFIX
             and key[-2:] == ("config", "--quiet")
         ):
             return CommandResult(key, 0, "", "")
