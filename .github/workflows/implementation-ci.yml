@@ -43,24 +43,32 @@ jobs:
           python3 -m json.tool config/commands.json >/dev/null
 
   deployment-lock:
-    if: github.event_name == 'push' && hashFiles('deploy/requirements.lock') == ''
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feat/existing-openclaw-deployer
+          ref: ${{ github.head_ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - name: Generate hash-locked requirements
+      - name: Generate hash-locked requirements when absent
+        id: lock
+        shell: bash
         run: |
+          if [ -f deploy/requirements.lock ]; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python3 -m pip install pip-tools==7.6.0 typing-extensions
           pip-compile --generate-hashes --output-file deploy/requirements.lock deploy/requirements.in
+          echo "created=true" >> "$GITHUB_OUTPUT"
       - name: Commit requirements lock
+        if: steps.lock.outputs.created == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add deploy/requirements.lock
           git commit -m "build(deploy): add hashed dependency lock"
-          git push origin HEAD:feat/existing-openclaw-deployer
+          git push origin HEAD:${{ github.head_ref }}
