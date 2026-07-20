@@ -41,3 +41,23 @@ jobs:
         run: |
           python3 -m json.tool config/routing.json >/dev/null
           python3 -m json.tool config/commands.json >/dev/null
+
+  deployment-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Generate hash-locked requirements
+        run: |
+          python3 -m pip install pip-tools==7.6.0
+          pip-compile --generate-hashes --output-file /tmp/requirements.lock deploy/requirements.in
+      - name: Upload requirements lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-requirements-lock
+          path: /tmp/requirements.lock
+          if-no-files-found: error
+          retention-days: 3
