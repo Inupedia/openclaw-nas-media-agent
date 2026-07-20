@@ -1,5 +1,17 @@
 # Agent 部署手册
 
+本手册的首要规则是：**Agent 必须调用仓库内置部署器，不得根据文档自行拼装另一套部署流程。**
+
+```bash
+python3 deploy/cli.py init
+python3 deploy/cli.py discover
+python3 deploy/cli.py plan
+python3 deploy/cli.py apply --plan-id PLAN_ID --confirmed
+python3 deploy/cli.py verify --level safe
+```
+
+所有命令输出一个 JSON 文档。Agent 根据 `status`、`nextAction` 和稳定错误码推进；遇到 `manual_action_required` 时停止并请求用户完成明确动作。下面的检查项用于理解和排错，不替代部署器。
+
 本文不是给用户逐行照抄的安装教程，而是给具有 NAS 与 Docker 管理权限的部署 Agent 使用的执行契约。
 
 ## 目标

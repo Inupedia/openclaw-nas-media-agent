@@ -10,9 +10,10 @@ class ReadmeContractTests(unittest.TestCase):
 
     def test_readme_starts_with_agent_first_installation(self):
         content = self.readme_path.read_text(encoding="utf-8")
-        first_install = content.index("请部署这个项目：")
-        manual_install = content.index("git clone")
+        first_install = content.index("python3 deploy/cli.py init")
+        manual_install = content.index("## 手动部署")
         self.assertLess(first_install, manual_install)
+        self.assertIn("确定性部署", content[:manual_install])
 
     def test_readme_documents_verified_nas_flow_and_safety(self):
         content = self.readme_path.read_text(encoding="utf-8")

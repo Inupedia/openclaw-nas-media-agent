@@ -80,15 +80,29 @@ class ParserTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(parser.parse_args(argv).command, expected)
 
-    def test_unimplemented_command_returns_structured_manual_action(self):
-        stream = io.StringIO()
-        code = main(["init"], stream=stream)
-        payload = json.loads(stream.getvalue())
-        self.assertEqual(code, 2)
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["status"], "manual_action_required")
-        self.assertEqual(payload["nextAction"], "implementation_pending")
-        self.assertEqual(payload["data"]["command"], "init")
+    def test_init_is_implemented_and_uses_json_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "deploy").mkdir()
+            stream = io.StringIO()
+            prompts = io.StringIO()
+            code = main(
+                ["init"],
+                stream=stream,
+                input_stream=io.StringIO("\n" * 11),
+                prompt_stream=prompts,
+                project_root=root,
+            )
+            payload = json.loads(stream.getvalue())
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "manual_action_required")
+            self.assertEqual(
+                payload["nextAction"],
+                "fill_secret_files_then_run_discover",
+            )
+            self.assertNotIn("secret-value", stream.getvalue())
+            self.assertNotIn("Cookie value", prompts.getvalue())
 
     def test_invalid_arguments_return_json_without_traceback(self):
         stream = io.StringIO()
