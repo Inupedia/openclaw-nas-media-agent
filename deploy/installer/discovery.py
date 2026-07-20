@@ -152,12 +152,29 @@ def _container_image(row: Mapping[str, object]) -> str:
     return str(row.get("Image") or "").strip()
 
 
+_DEPENDENCY_NAME_MARKERS = (
+    "qas",
+    "quark-auto-save",
+    "pansou",
+    "aria2",
+    "ariang",
+    "singbox",
+    "sing-box",
+    "proxy",
+)
+
+
 def _has_openclaw_evidence(row: Mapping[str, object], explicit: str | None) -> bool:
     name = _container_name(row)
     if explicit is not None:
         return name == explicit
-    evidence = f"{name} {_container_image(row)}".casefold()
-    return "openclaw" in evidence
+    image = _container_image(row).casefold()
+    if "openclaw" in image:
+        return True
+    normalized_name = name.casefold()
+    if "openclaw" not in normalized_name:
+        return False
+    return not any(marker in normalized_name for marker in _DEPENDENCY_NAME_MARKERS)
 
 
 def _labels(inspect: Mapping[str, object]) -> Mapping[str, object]:
