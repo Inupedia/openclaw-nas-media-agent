@@ -1,0 +1,55 @@
+diff --git a/scripts/resource_agent.py b/scripts/resource_agent.py
+index 5b95b95..58324aa 100644
+--- a/scripts/resource_agent.py
++++ b/scripts/resource_agent.py
+@@ -28,9 +28,10 @@ from quark_client import USER_AGENT, QuarkClient
+ from qas_client import ClientError, QasClient
+ from state_store import PlanError, StateStore
+ from download_fs import (
++    DownloadFsError,
+     ensure_aria2_writable,
+     ensure_managed_download_roots,
+-    is_world_writable,
++    probe_writable,
+ )
+ 
+ 
+@@ -675,8 +676,9 @@ class ResourceAgent:
+         if "18" in error_codes:
+             notes.append(
+                 "aria2_error_18: Download aborted - often missing/unwritable "
+-                "staging dir under /volume2/downloads/.incoming (chmod 777) "
+-                "or Quark/QAS failed to push files"
++                "staging dir under downloads/.incoming; verify the discovered "
++                "UID/GID, shared group, ACL, or managed fallback permissions, "
++                "or check whether Quark/QAS failed to push files"
+             )
+         if "16" in error_codes and staging_files == 0:
+             notes.append(
+@@ -838,22 +840,17 @@ class ResourceAgent:
+         for root in staging_roots:
+             try:
+                 ensure_aria2_writable(root)
+-            except OSError:
+-                pass
+-            if not root.is_dir() or not os.access(root, os.W_OK):
++            except (OSError, DownloadFsError) as error:
+                 return {
+                     "ok": False,
+                     "nextAction": "fix_path_permissions",
+-                    "error": f"staging path is not writable: {root}",
++                    "error": f"unable to prepare staging path {root}: {error}",
+                 }
+-            if os.name == "posix" and not is_world_writable(root):
++            if not probe_writable(root):
+                 return {
+                     "ok": False,
+                     "nextAction": "fix_path_permissions",
+-                    "error": (
+-                        f"staging path is not world-writable for aria2 nobody: "
+-                        f"{root} (chmod 777 required)"
+-                    ),
++                    "error": f"staging path failed effective write probe: {root}",
+                 }
+         path_check = self._check_library_roots()
+         if not path_check.get("ok"):
