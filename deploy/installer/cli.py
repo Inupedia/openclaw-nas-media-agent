@@ -16,8 +16,10 @@ from .errors import DeploymentError
 from .models import Change
 from .output import emit, result_payload
 from .planning import build_plan
+from .renderer import render_and_validate
 from .runtime import RuntimePaths, atomic_write_json
 from .secrets import SecretStore
+from .versions import VersionLock
 
 
 class CliUsageError(ValueError):
@@ -137,7 +139,8 @@ def run_discover(
     root = _project_root(project_root)
     config = load_config(root / "deploy" / "config.yaml")
     runtime = RuntimePaths.for_project(root)
-    report = discover(config, runner or CommandRunner(cwd=root))
+    active_runner = runner or CommandRunner(cwd=root)
+    report = discover(config, active_runner)
     report_data = report.to_dict()
     atomic_write_json(runtime.discovery_report, report_data)
     return result_payload(
@@ -159,8 +162,16 @@ def run_plan(
     config = load_config(root / "deploy" / "config.yaml")
     runtime = RuntimePaths.for_project(root)
     secrets = SecretStore(root / "deploy" / "secrets")
-    report = discover(config, runner or CommandRunner(cwd=root))
+    active_runner = runner or CommandRunner(cwd=root)
+    report = discover(config, active_runner)
     atomic_write_json(runtime.discovery_report, report.to_dict())
+    versions = VersionLock.load(root / "deploy" / "versions.yaml")
+    render_and_validate(
+        config,
+        versions,
+        runtime.rendered_dir,
+        active_runner,
+    )
     plan = build_plan(
         config,
         secrets,
