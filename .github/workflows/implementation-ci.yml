@@ -67,3 +67,242 @@ jobs:
           path: /tmp/source-snapshot.tar.gz
           if-no-files-found: error
           retention-days: 1
+
+  capture-qas-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start locked QAS image with dummy credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/qas-config /tmp/qas-contract
+          chmod 700 /tmp/qas-config /tmp/qas-contract
+          docker run -d \
+            --name qas-contract \
+            -e TZ=Asia/Shanghai \
+            -e WEBUI_USERNAME=fixture-admin \
+            -e WEBUI_PASSWORD=fixture-password \
+            -p 127.0.0.1:15005:5005 \
+            -v /tmp/qas-config:/app/config \
+            cp0204/quark-auto-save@sha256:4d97439c0cd095c5fb8ef7133ca4726c8a3f996fa319f8c049180270b61c29be
+          ready=false
+          for _ in $(seq 1 60); do
+            if python3 - <<'PY'
+          import urllib.request
+          try:
+              with urllib.request.urlopen("http://127.0.0.1:15005/", timeout=1) as response:
+                  response.read(1)
+              raise SystemExit(0)
+          except Exception:
+              raise SystemExit(1)
+          PY
+            then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          printf '{"ready":%s}\n' "$ready" > /tmp/qas-contract/service-status.json
+          docker inspect qas-contract > /tmp/qas-contract/container-inspect.raw.json
+          docker logs qas-contract > /tmp/qas-contract/container.log 2>&1 || true
+      - name: Capture and sanitize config, API and UI structure
+        if: always()
+        shell: bash
+        run: |
+          cat > /tmp/capture_qas_contract.py <<'PY'
+          from __future__ import annotations
+
+          import json
+          import re
+          import urllib.parse
+          import urllib.request
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          CONFIG_ROOT = Path("/tmp/qas-config")
+          OUTPUT = Path("/tmp/qas-contract")
+          OUTPUT.mkdir(parents=True, exist_ok=True)
+          SENSITIVE = re.compile(r"cookie|token|password|secret|authorization", re.I)
+
+          def replacement(value):
+              if isinstance(value, dict):
+                  return {str(k): replacement(v) for k, v in value.items()}
+              if isinstance(value, list):
+                  return [replacement(v) for v in value] or ["***"]
+              if isinstance(value, bool):
+                  return False
+              if isinstance(value, int):
+                  return 0
+              if isinstance(value, float):
+                  return 0.0
+              if value is None:
+                  return None
+              return "***"
+
+          def sanitize(value, parent_key=""):
+              if SENSITIVE.search(parent_key):
+                  return replacement(value)
+              if isinstance(value, dict):
+                  return {str(k): sanitize(v, str(k)) for k, v in value.items()}
+              if isinstance(value, list):
+                  return [sanitize(v, parent_key) for v in value]
+              if isinstance(value, str):
+                  value = value.replace("fixture-password", "***")
+                  value = value.replace("fixture-admin", "fixture-user")
+                  return re.sub(r"https?://(?:127\.0\.0\.1|localhost):\d+", "http://fixture.local", value)
+              return value
+
+          def collect_tokens(value, parent_key=""):
+              found = []
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      found.extend(collect_tokens(child, str(key)))
+              elif isinstance(value, list):
+                  for child in value:
+                      found.extend(collect_tokens(child, parent_key))
+              elif isinstance(value, str) and "token" in parent_key.casefold() and value.strip():
+                  found.append(value.strip())
+              return found
+
+          decoded = []
+          tokens = []
+          file_index = []
+          for path in sorted(CONFIG_ROOT.rglob("*")):
+              if not path.is_file():
+                  continue
+              relative = str(path.relative_to(CONFIG_ROOT))
+              file_index.append({"path": relative, "size": path.stat().st_size})
+              if path.suffix.casefold() != ".json":
+                  continue
+              try:
+                  value = json.loads(path.read_text(encoding="utf-8"))
+              except Exception:
+                  continue
+              decoded.append((relative, value))
+              tokens.extend(collect_tokens(value))
+              destination = OUTPUT / "config" / (relative.replace("/", "__") + ".json")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_text(
+                  json.dumps(sanitize(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                  encoding="utf-8",
+              )
+          (OUTPUT / "config-files.json").write_text(
+              json.dumps(file_index, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          candidates = []
+          for value in ["", "fixture-token", *tokens]:
+              if value not in candidates:
+                  candidates.append(value)
+          responses = []
+          successful = None
+          for token in candidates:
+              query = "" if not token else "?" + urllib.parse.urlencode({"token": token})
+              url = "http://127.0.0.1:15005/data" + query
+              try:
+                  with urllib.request.urlopen(url, timeout=3) as response:
+                      body = response.read().decode("utf-8", errors="replace")
+                      status = response.status
+              except Exception as error:
+                  responses.append({"candidate": "***" if token else "", "errorType": type(error).__name__})
+                  continue
+              try:
+                  parsed = json.loads(body)
+              except Exception:
+                  parsed = {"rawType": "text", "length": len(body)}
+              entry = {"candidate": "***" if token else "", "status": status, "body": sanitize(parsed)}
+              responses.append(entry)
+              if isinstance(parsed, dict) and parsed.get("success") is True:
+                  successful = sanitize(parsed)
+                  break
+          (OUTPUT / "data-attempts.json").write_text(
+              json.dumps(responses, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          (OUTPUT / "data-response.json").write_text(
+              json.dumps(successful or {"success": False, "data": None}, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          class ContractParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.elements = []
+                  self._button = None
+
+              def handle_starttag(self, tag, attrs):
+                  if tag not in {"form", "input", "select", "textarea", "button", "a"}:
+                      return
+                  item = {"tag": tag}
+                  for key, value in attrs:
+                      if key in {"id", "name", "type", "action", "method", "placeholder", "role", "href"}:
+                          item[key] = value or ""
+                  self.elements.append(item)
+                  if tag == "button":
+                      self._button = item
+
+              def handle_endtag(self, tag):
+                  if tag == "button":
+                      self._button = None
+
+              def handle_data(self, data):
+                  if self._button is not None and data.strip():
+                      self._button["text"] = (self._button.get("text", "") + " " + data.strip()).strip()
+
+          ui = {"elements": [], "pageType": "unavailable"}
+          try:
+              with urllib.request.urlopen("http://127.0.0.1:15005/", timeout=3) as response:
+                  html = response.read().decode("utf-8", errors="replace")
+              parser = ContractParser()
+              parser.feed(html)
+              ui = {
+                  "pageType": "html",
+                  "elements": sorted(parser.elements, key=lambda item: json.dumps(item, sort_keys=True)),
+                  "containsLoginText": any(term in html.casefold() for term in ("login", "登录")),
+                  "containsQrText": any(term in html.casefold() for term in ("qrcode", "二维码", "扫码")),
+                  "containsCaptchaText": any(term in html.casefold() for term in ("captcha", "验证码")),
+              }
+          except Exception as error:
+              ui = {"pageType": "unavailable", "errorType": type(error).__name__, "elements": []}
+          (OUTPUT / "ui-contract.json").write_text(
+              json.dumps(ui, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          inspect_path = OUTPUT / "container-inspect.raw.json"
+          if inspect_path.exists():
+              try:
+                  inspected = json.loads(inspect_path.read_text(encoding="utf-8"))
+                  inspect_path.with_name("container-inspect.json").write_text(
+                      json.dumps(sanitize(inspected), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                      encoding="utf-8",
+                  )
+              except Exception:
+                  pass
+              inspect_path.unlink(missing_ok=True)
+
+          log_path = OUTPUT / "container.log"
+          if log_path.exists():
+              text = log_path.read_text(encoding="utf-8", errors="replace")
+              for token in tokens:
+                  if token:
+                      text = text.replace(token, "***")
+              text = text.replace("fixture-password", "***")
+              log_path.write_text(text, encoding="utf-8")
+          PY
+          python3 /tmp/capture_qas_contract.py
+          find /tmp/qas-contract -maxdepth 3 -type f -printf '%P\n' | sort
+      - name: Upload sanitized QAS contract
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qas-v1-contract
+          path: /tmp/qas-contract
+          if-no-files-found: error
+          retention-days: 3
+      - name: Stop fixture container
+        if: always()
+        run: docker rm -f qas-contract || true
