@@ -1,0 +1,45 @@
+name: Resolve Image Lock
+
+on:
+  push:
+    branches:
+      - feat/existing-openclaw-deployer
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Resolve multi-platform manifest digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/image-lock.tsv
+          resolve() {
+            component="$1"
+            image="$2"
+            digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')"
+            case "$digest" in
+              sha256:????????????????????????????????????????????????????????????????) ;;
+              *) echo "invalid digest for $component: $digest" >&2; exit 1 ;;
+            esac
+            printf '%s\t%s\t%s\n' "$component" "$image" "$digest" >> /tmp/image-lock.tsv
+          }
+          resolve qas cp0204/quark-auto-save:v0.8.7
+          resolve pansou ghcr.io/fish2018/pansou:latest
+          resolve aria2 p3terx/aria2-pro:latest
+          resolve sing_box ghcr.io/sagernet/sing-box:v1.13.12
+          resolve playwright mcr.microsoft.com/playwright/python:v1.61.0-noble
+          cat /tmp/image-lock.tsv
+      - name: Upload resolved lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolved-image-lock
+          path: /tmp/image-lock.tsv
+          if-no-files-found: error
+          retention-days: 3
