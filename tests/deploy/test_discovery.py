@@ -70,7 +70,7 @@ class FixtureRunner:
         ):
             return CommandResult(key, 0, json.dumps(self.compose), "")
         if (
-            len(key) == 7
+            len(key) == 6
             and key[:3] == ("docker", "compose", "-f")
             and key[-2:] == ("config", "--quiet")
         ):
