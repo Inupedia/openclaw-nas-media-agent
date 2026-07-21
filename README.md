@@ -186,7 +186,7 @@ python3 deploy/cli.py plan
 python3 deploy/cli.py apply --plan-id PLAN_ID --confirmed
 python3 deploy/cli.py verify --level safe
 python3 deploy/cli.py verify --level full --confirmed
-python3 deploy/cli.py rollback
+python3 deploy/cli.py rollback --deployment-id DEPLOYMENT_ID
 ```
 
 详细文档：
