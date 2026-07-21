@@ -10,10 +10,14 @@ class ReadmeContractTests(unittest.TestCase):
 
     def test_readme_starts_with_agent_first_installation(self):
         content = self.readme_path.read_text(encoding="utf-8")
-        first_install = content.index("python3 deploy/cli.py init")
+        quick_install = content.index("## 快速部署：复制给 Agent")
         manual_install = content.index("## 手动部署")
-        self.assertLess(first_install, manual_install)
-        self.assertIn("确定性部署", content[:manual_install])
+        self.assertLess(quick_install, manual_install)
+        quick_section = content[quick_install:manual_install]
+        self.assertIn("只需要做一件事", quick_section)
+        self.assertIn("复制下面整段内容", quick_section)
+        self.assertIn("粘贴", quick_section)
+        self.assertIn("deploy/cli.py", quick_section)
 
     def test_readme_documents_verified_nas_flow_and_safety(self):
         content = self.readme_path.read_text(encoding="utf-8")

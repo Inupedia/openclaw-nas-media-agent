@@ -17,9 +17,9 @@
 <p align="center">
   <a href="https://www.bilibili.com/video/BV1tRKB6rEsW">▶ 查看演示</a>
   ·
-  <a href="docs/deployment/QUICKSTART.md">快速部署</a>
+  <a href="#快速部署复制给-agent推荐">快速部署</a>
   ·
-  <a href="docs/AGENT_DEPLOY.md">交给 Agent 部署</a>
+  <a href="#手动部署">手动部署</a>
   ·
   <a href="docs/deployment/TROUBLESHOOTING.md">故障排查</a>
 </p>
@@ -86,15 +86,60 @@ flowchart LR
 | aria2 | 执行下载并提供 RPC 状态 | 远端流程必需 |
 | ffprobe | 增强视频可读性校验 | 可选 |
 
-## 确定性部署（推荐）
+## 快速部署：复制给 Agent（推荐）
 
-当前版本正式支持：
+这条路径适合绝大多数用户。
 
-- 已经安装 OpenClaw 的 UGREEN UGOS；
-- 标准 Linux Docker / Docker Compose 主机；
-- 群晖、威联通、TrueNAS、Unraid 等平台可按标准 Docker 方式尝试。
+你只需要做一件事：**复制下面整段内容，粘贴给能够操作目标主机终端和文件的 Agent。**
 
-部署不再依赖 Agent 临场拼装命令。Agent 和人工用户都调用仓库内同一套 Python 部署器：
+可使用 Codex、Claude Code、Cursor、OpenCode、OpenCodex，或其他具备终端和文件操作能力的编码 Agent。后续只有在 Agent 询问路径、登录、扫码、验证码、冲突选择或危险操作确认时，你才需要参与。
+
+<!-- AGENT_QUICK_DEPLOY_PROMPT_START -->
+```text
+请帮我在当前 NAS 或 Linux Docker 主机上完整部署这个项目：
+
+https://github.com/Inupedia/openclaw-nas-media-agent
+
+你需要自行完成仓库克隆或更新、环境检查、配置生成、依赖部署、OpenClaw Skill 安装、服务初始化和安全验收。
+
+开始前必须先读取并严格遵守仓库中的以下文件：
+
+1. AGENTS.md
+2. docs/AGENT_DEPLOY.md
+3. docs/deployment/QUICKSTART.md
+4. docs/deployment/SECURITY.md
+5. docs/deployment/EXISTING_OPENCLAW.md
+6. docs/deployment/QAS_LOGIN.md
+7. docs/deployment/PROXY.md
+8. docs/deployment/TROUBLESHOOTING.md
+
+执行要求：
+
+- 必须使用仓库内置的 deploy/cli.py 部署器，不得自行编造另一套部署流程；
+- 当前目标是已有 Compose 管理的 OpenClaw 环境，不要承诺或尝试从空白主机自动安装 OpenClaw 本体；
+- 先执行只读发现和部署计划，确认环境后再修改系统；
+- 优先复用已有 OpenClaw、QAS、PanSou、aria2、Docker 网络和挂载目录；
+- 不得猜测 NAS 路径、端口、账号、密钥或冲突目标；
+- 需要缺失信息时直接向我提问；
+- 遇到登录、扫码、验证码、冲突选择或危险操作确认时暂停并让我处理；
+- 不得在聊天、日志、报告或 Git 提交中输出 Cookie、Token、密码和 RPC Secret；
+- 未经我明确确认，不执行真实下载、整理入库或破坏性操作；
+- 按 deploy/cli.py 输出的 status、nextAction 和错误码持续处理可安全自动修复的问题，直到 verify --level safe 完成；
+- 最后向我报告部署状态、容器状态、路径映射、人工待办、验收结果和回滚方式。
+
+现在开始部署。
+```
+<!-- AGENT_QUICK_DEPLOY_PROMPT_END -->
+
+Agent 会按照 [`AGENTS.md`](AGENTS.md) 和 [`docs/AGENT_DEPLOY.md`](docs/AGENT_DEPLOY.md) 执行仓库内置部署器，而不是临场拼装另一套脚本。它会先只读发现和生成计划，安全问题会自动处理；无法自动完成的步骤才会向你提问。
+
+当前版本要求 OpenClaw 已经通过 Docker Compose 运行。它不会从空白主机自动安装 OpenClaw 本体。
+
+详细说明见 [快速部署](docs/deployment/QUICKSTART.md)。
+
+## 手动部署
+
+适合希望自己检查并执行每一步的用户。手动路径与 Agent 快速部署使用同一套确定性部署器：
 
 ```bash
 git clone https://github.com/Inupedia/openclaw-nas-media-agent.git
@@ -132,15 +177,6 @@ deploy/secrets/
 
 部署器要求 secrets 目录权限为 `0700`、文件权限为 `0600`，并通过只读文件挂载把凭据交给 OpenClaw。计划、日志和验收报告不会保存真实密钥值。
 
-### 需要人工参与的情况
-
-只有以下情况会暂停并要求用户操作：
-
-- QAS 或来源网站登录、扫码、验证码；
-- 自动发现存在多个可信候选；
-- 修改目录权限、执行真实下载或其他危险操作；
-- `full` 业务验收。
-
 ### 常用部署命令
 
 ```bash
@@ -150,19 +186,16 @@ python3 deploy/cli.py plan
 python3 deploy/cli.py apply --plan-id PLAN_ID --confirmed
 python3 deploy/cli.py verify --level safe
 python3 deploy/cli.py verify --level full --confirmed
-python3 deploy/cli.py rollback
+python3 deploy/cli.py rollback --deployment-id DEPLOYMENT_ID
 ```
 
 详细文档：
 
-- [快速部署](docs/deployment/QUICKSTART.md)
 - [已有 OpenClaw 模式](docs/deployment/EXISTING_OPENCLAW.md)
 - [QAS 登录与初始化](docs/deployment/QAS_LOGIN.md)
 - [PanSou 与代理](docs/deployment/PROXY.md)
 - [安全说明](docs/deployment/SECURITY.md)
 - [故障排查](docs/deployment/TROUBLESHOOTING.md)
-
-> 当前版本不会从空白环境自动安装 OpenClaw 本体；请先确保 OpenClaw 已通过 Docker Compose 运行。
 
 ## 演示效果
 
@@ -236,9 +269,9 @@ bin/mediactl organize execute PLAN_ID --confirmed
 - 不要为排错向 Agent 开放任意 shell、`rm`、`curl`、Python 或 sudo。
 - 本项目仅用于管理你拥有、制作或已获授权使用的媒体内容；请遵守所在地法律、平台条款和版权许可。
 
-## 手动部署（高级）
+## 高级配置参考
 
-不建议新用户从这里开始。手动方式主要用于调试部署器或适配特殊 Docker 环境。
+不建议新用户从这里开始。高级方式主要用于调试部署器或适配特殊 Docker 环境。
 
 仓库仍保留：
 
