@@ -16,6 +16,10 @@
 - Diff hygiene:
   - `git diff --check` succeeds.
   - no runtime secrets, generated runtime state, temporary patch jobs, or writable CI permissions are part of the intended final change.
+- Docker-focused compatibility:
+  - deployment tests pass on Python 3.10, 3.11 and 3.12;
+  - Compose generation, image digest locking, container-network contracts, volume mapping, health verification and rollback behavior are covered by fixtures and CI;
+  - the maintainer accepts standards-compliant Linux Docker/Compose verification as the release criterion because the target NAS platforms run the stack through Docker.
 
 ## Approved-design coverage
 
@@ -50,11 +54,10 @@ The final coverage review found that QAS/OpenClaw, PanSou/proxy and aria2 adapte
 6. verifies PanSou and optional sing-box, preserving a usable deployment as `degraded` when optional discovery components fail;
 7. runs the non-mutating safe business verification automatically after apply.
 
-## External scenario status
+## Acceptance decision
 
-The automated suite and fixture end-to-end flow are complete. Two plan steps require resources not available in this execution environment and therefore are **not claimed as completed**:
+The maintainer has explicitly accepted Docker/Compose CI as sufficient for this phase. A physical UGOS, Synology, QNAP, TrueNAS or Unraid appliance is **not a merge prerequisite**, because the delivered runtime is containerized and targets standards-compliant Linux Docker/Compose behavior.
 
-- a read-only dry run against an actual UGOS/Linux NAS with the user's existing OpenClaw installation;
-- a controlled apply/safe verification/rollback against non-production QAS, PanSou, aria2 and OpenClaw services, plus optional confirmed full verification using a user-provided legal test share URL.
+Host-specific differences such as NAS ACL implementations, volume path conventions, Docker UI wrappers and vendor-specific permission defaults remain documented deployment risks. They are handled by read-only discovery, explicit planning, permission probes, rollback and troubleshooting guidance rather than by blocking this pull request.
 
-The pull request should remain a draft until that controlled environment run is recorded, or the maintainer explicitly accepts fixture/CI verification for the first review round.
+The implementation is ready for normal maintainer review and merge based on the recorded Docker-focused automated evidence.
