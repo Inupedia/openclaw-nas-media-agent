@@ -38,7 +38,7 @@ jobs:
           test "$actual" = "$expected"
           git apply --check /tmp/task16.patch
           git apply /tmp/task16.patch
-          rm "${parts[@]}"
+          rm "${parts[@]}" .github/task16.trigger
       - name: Install locked dependencies
         run: python3 -m pip install --require-hashes -r deploy/requirements.lock
       - name: Run complete verification
