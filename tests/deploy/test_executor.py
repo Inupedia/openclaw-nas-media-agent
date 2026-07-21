@@ -9,6 +9,7 @@ from deploy.installer.models import (
     ChangePhase,
     DeploymentPlan,
     DeploymentStatus,
+    VerificationResult,
 )
 from deploy.installer.runtime import RuntimePaths
 
@@ -121,6 +122,63 @@ class ExecutorTests(unittest.TestCase):
         second = resume_deployment("dep3", current_plan, context)
         self.assertEqual(second.status, DeploymentStatus.READY)
         self.assertEqual(events.count("A"), 1)
+
+
+    def test_safe_verification_manual_gate_does_not_rollback_completed_changes(self):
+        events = []
+
+        def write(item):
+            events.append("do:" + item.id)
+
+        def undo(data):
+            events.append("undo:" + data["name"])
+
+        context = ExecutionContext(
+            self.runtime,
+            self.project,
+            {"write_file": write},
+            {"undo": undo},
+            verify_safe=lambda: VerificationResult(
+                level="safe",
+                status=DeploymentStatus.MANUAL_ACTION_REQUIRED,
+                components=(),
+                next_action="provide_legal_test_share_url",
+            ),
+            deployment_id="dep-safe-gate",
+        )
+        result = apply_plan(plan(change("A")), context)
+        self.assertEqual(result.status, DeploymentStatus.MANUAL_ACTION_REQUIRED)
+        self.assertEqual(result.next_action, "provide_legal_test_share_url")
+        self.assertEqual(events, ["do:A"])
+
+
+    def test_optional_component_degradation_survives_successful_apply(self):
+        def verify(item):
+            return {
+                "status": "degraded",
+                "nextAction": "check_optional_component",
+            }
+
+        verification_change = Change(
+            "verify-optional",
+            ChangePhase.VERIFICATION,
+            "pansou",
+            "run_verification",
+            "pansou",
+            side_effect=False,
+        )
+        context = ExecutionContext(
+            self.runtime,
+            self.project,
+            {"run_verification": verify},
+            deployment_id="dep-degraded",
+        )
+        result = apply_plan(plan(verification_change), context)
+        self.assertEqual(result.status, DeploymentStatus.DEGRADED)
+        journal = json.loads(
+            self.runtime.journal_file("dep-degraded").read_text(encoding="utf-8")
+        )
+        self.assertEqual(journal["status"], "degraded")
 
     def test_journal_persists_inverse_actions_for_explicit_rollback(self):
         context = ExecutionContext(

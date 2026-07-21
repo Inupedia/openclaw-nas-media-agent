@@ -77,6 +77,8 @@ class FixtureRunner:
             "json",
         ):
             return CommandResult(key, 0, json.dumps(self.compose), "")
+        if key and key[0] == "docker" and "compose" in key and key[-2:] == ("config", "--quiet"):
+            return CommandResult(key, 0, "", "")
         if (
             len(key) == 9
             and key[:6] == _VALIDATION_PREFIX

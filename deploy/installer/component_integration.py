@@ -1,0 +1,330 @@
+"""Connect tested QAS/OpenClaw adapters to the default deployment plan."""
+from __future__ import annotations
+
+import os
+import tempfile
+import time
+from pathlib import Path
+
+from .adapters.openclaw_v1 import OpenClawV1Adapter
+from .adapters.proxy import ProxyAdapter
+from .adapters.qas_v1 import QasDesiredState, derive_api_token, normalize_cookies
+from .command import CommandRunner
+from .config import DeploymentConfig
+from .discovery import DiscoveryReport
+from .errors import DeploymentError
+from .models import Change, ChangePhase, ComponentStatus
+from .renderer import render_openclaw_override, render_proxy_compose
+from .runtime import RuntimePaths
+from .secrets import SecretStore
+from .versions import VersionLock
+
+QAS_TOKEN_CONTAINER_PATH = "/run/secrets/openclaw_media_qas_token"
+ARIA2_SECRET_CONTAINER_PATH = "/run/secrets/openclaw_media_aria2_rpc_secret"
+
+
+def resolve_openclaw_config_path(
+    config: DeploymentConfig,
+    discovery: DiscoveryReport,
+) -> Path:
+    if config.openclaw.config_host_path is not None:
+        candidate = config.openclaw.config_host_path
+    else:
+        candidate = discovery.openclaw.workspace_host_dir / "openclaw.json"
+    if not candidate.is_file():
+        raise DeploymentError(
+            "OPENCLAW_CONFIG_NOT_FOUND",
+            "OpenClaw config path could not be resolved safely",
+            status="manual_action_required",
+            next_action="set_openclaw_config_host_path",
+            details={"candidate": str(candidate)},
+        )
+    return candidate
+
+
+def effective_qas_token(config: DeploymentConfig, secrets: SecretStore) -> str:
+    password = secrets.read(config.qas.password_secret)
+    if not password:
+        raise DeploymentError(
+            "QAS_PASSWORD_EMPTY",
+            "QAS WebUI password secret is empty",
+            status="manual_action_required",
+            next_action="fill_secret_file",
+            details={"name": config.qas.password_secret},
+        )
+    derived = derive_api_token(config.qas.username, password)
+    provided = secrets.read(config.qas.api_token_secret).strip()
+    if provided and provided != derived:
+        raise DeploymentError(
+            "QAS_API_TOKEN_MISMATCH",
+            "QAS API token secret does not match the locked image derivation",
+            status="manual_action_required",
+            next_action="clear_or_regenerate_qas_api_token",
+        )
+    return provided or derived
+
+
+def qas_desired_state(config: DeploymentConfig, secrets: SecretStore) -> QasDesiredState:
+    return QasDesiredState(
+        username=config.qas.username,
+        password=secrets.read(config.qas.password_secret),
+        api_token=effective_qas_token(config, secrets),
+        cookies=normalize_cookies(secrets.read(config.qas.quark_cookie_secret)),
+        aria2_host_port="aria2:6800",
+        aria2_secret=secrets.read(config.aria2.rpc_secret),
+        aria2_dir="/nas/downloads",
+    )
+
+
+def openclaw_env_refs(config: DeploymentConfig) -> dict[str, str]:
+    return {
+        "QAS_BASE_URL": "http://qas:5005",
+        "QAS_TOKEN_FILE": QAS_TOKEN_CONTAINER_PATH,
+        "PANSOU_BASE_URL": "http://pansou:8888",
+        "PANSOU_MAX_CANDIDATES": str(config.pansou.max_candidates),
+        "ARIA2_RPC_URL": "http://aria2:6800/jsonrpc",
+        "ARIA2_RPC_SECRET_FILE": ARIA2_SECRET_CONTAINER_PATH,
+    }
+
+
+def build_component_changes(
+    root: Path,
+    config: DeploymentConfig,
+    secrets: SecretStore,
+    discovery: DiscoveryReport,
+    runtime: RuntimePaths,
+    runner: CommandRunner,
+    versions: VersionLock,
+) -> tuple[Change, ...]:
+    config_path = resolve_openclaw_config_path(config, discovery)
+    effective_qas_token(config, secrets)
+    derived_secret = runtime.root / "secrets" / "qas_token"
+    aria_secret = secrets.root / config.aria2.rpc_secret
+    rendered_override = runtime.rendered_dir / "compose.openclaw.override.yml"
+    render_openclaw_override(
+        config,
+        discovery.openclaw,
+        rendered_override,
+        qas_token_file=derived_secret,
+        aria2_secret_file=aria_secret,
+        runner=runner,
+    )
+    override_target = config.project_dir / "compose.openclaw.override.yml"
+    adapter = OpenClawV1Adapter(
+        discovery.openclaw,
+        config_path,
+        Path(root),
+        runner=runner,
+    )
+    env_refs = openclaw_env_refs(config)
+    openclaw_changes = adapter.plan(override_target, env_refs)
+    optional_changes: list[Change] = []
+    if config.pansou.proxy.mode == "managed":
+        ProxyAdapter(config.pansou.proxy, secrets, versions).managed_config()
+        rendered_proxy = runtime.rendered_dir / "compose.proxy.yml"
+        render_proxy_compose(
+            config,
+            versions,
+            secrets.root,
+            rendered_proxy,
+            runner,
+        )
+        proxy_target = config.project_dir / "compose.proxy.yml"
+        optional_changes.append(
+            Change(
+                id="write-managed-proxy-compose",
+                phase=ChangePhase.FILESYSTEM,
+                component="proxy",
+                action="write_file",
+                target=str(proxy_target),
+                after={"source": str(rendered_proxy), "mode": "0644"},
+                side_effect=True,
+                rollback={"action": "restore_file", "target": str(proxy_target)},
+            )
+        )
+    qas_config = config.project_dir / "qas" / "config" / "config" / "quark_config.json"
+    qas_backup = runtime.root / "component-backups" / "qas-config.json"
+    verification_changes: list[Change] = [
+        Change(
+            id="aria2-verify",
+            phase=ChangePhase.VERIFICATION,
+            component="aria2",
+            action="run_verification",
+            target="openclaw-media-aria2",
+            after={"adapter": "aria2"},
+            side_effect=False,
+        )
+    ]
+    if config.pansou.enabled and config.pansou.mode != "disabled":
+        verification_changes.append(
+            Change(
+                id="pansou-verify",
+                phase=ChangePhase.VERIFICATION,
+                component="pansou",
+                action="run_verification",
+                target="openclaw-media-pansou",
+                after={"adapter": "pansou", "required": False},
+                side_effect=False,
+            )
+        )
+    if config.pansou.proxy.mode == "managed":
+        verification_changes.append(
+            Change(
+                id="proxy-verify",
+                phase=ChangePhase.VERIFICATION,
+                component="proxy",
+                action="run_verification",
+                target="openclaw-media-proxy",
+                after={"adapter": "sing-box", "required": False},
+                side_effect=False,
+            )
+        )
+
+    return (
+        *optional_changes,
+        Change(
+            id="write-derived-qas-token",
+            phase=ChangePhase.FILESYSTEM,
+            component="derived_secret",
+            action="write_file",
+            target=str(derived_secret),
+            before={"exists": derived_secret.exists()},
+            after={
+                "derivation": "qas-v0.8.7",
+                "mode": "0600",
+            },
+            side_effect=True,
+            rollback={"action": "remove_file", "path": str(derived_secret)},
+        ),
+        Change(
+            id="write-openclaw-override",
+            phase=ChangePhase.FILESYSTEM,
+            component="openclaw_override",
+            action="write_file",
+            target=str(override_target),
+            after={"source": str(rendered_override), "mode": "0644"},
+            side_effect=True,
+            rollback={"action": "restore_file", "target": str(override_target)},
+        ),
+        Change(
+            id="qas-initialize",
+            phase=ChangePhase.SERVICE_CONFIG,
+            component="qas",
+            action="http_config_update",
+            target=str(qas_config),
+            after={
+                "adapter": "qas-v0.8.7",
+                "backupPath": str(qas_backup),
+                "aria2HostPort": "aria2:6800",
+                "aria2Dir": "/nas/downloads",
+            },
+            side_effect=True,
+            rollback={"action": "restore_file", "source": str(qas_backup), "target": str(qas_config)},
+        ),
+        *openclaw_changes,
+        Change(
+            id="qas-restart",
+            phase=ChangePhase.RESTART,
+            component="qas",
+            action="restart_container",
+            target="openclaw-media-qas",
+            after={"container": "openclaw-media-qas"},
+            side_effect=True,
+            rollback={"action": "restart_container", "container": "openclaw-media-qas"},
+        ),
+        Change(
+            id="openclaw-verify",
+            phase=ChangePhase.VERIFICATION,
+            component="openclaw",
+            action="run_verification",
+            target=discovery.openclaw.container_name,
+            after={"adapter": "openclaw-v1"},
+            side_effect=False,
+        ),
+        Change(
+            id="qas-verify",
+            phase=ChangePhase.VERIFICATION,
+            component="qas",
+            action="run_verification",
+            target="openclaw-media-qas",
+            after={"adapter": "qas-v0.8.7"},
+            side_effect=False,
+        ),
+        *verification_changes,
+    )
+
+
+def atomic_write_secret(path: Path, value: str) -> None:
+    target = Path(path)
+    parent = target.parent
+    if parent.is_symlink():
+        raise DeploymentError(
+            "DERIVED_SECRET_PARENT_SYMLINK",
+            "derived secret parent must not be a symlink",
+            severity="security_block",
+            next_action="remove_runtime_symlink",
+        )
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if parent.is_symlink() or not parent.is_dir():
+        raise DeploymentError(
+            "DERIVED_SECRET_PARENT_INVALID",
+            "derived secret parent is invalid",
+            severity="security_block",
+            next_action="review_runtime_path",
+        )
+    if target.is_symlink():
+        raise DeploymentError(
+            "DERIVED_SECRET_TARGET_SYMLINK",
+            "derived secret target must not be a symlink",
+            severity="security_block",
+            next_action="remove_runtime_symlink",
+        )
+    os.chmod(parent, 0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        os.chmod(target, 0o600)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def wait_for_file(path: Path, *, timeout_seconds: int = 60) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if Path(path).is_file():
+            return
+        time.sleep(1)
+    raise DeploymentError(
+        "COMPONENT_CONFIG_TIMEOUT",
+        "component configuration file was not created in time",
+        status="manual_action_required",
+        next_action="inspect_component_logs",
+        details={"path": str(path)},
+    )
+
+
+def require_ready(result, *, component: str) -> None:
+    if result.status != ComponentStatus.READY:
+        raise DeploymentError(
+            f"{component.upper()}_VERIFICATION_FAILED",
+            f"{component} verification did not reach ready",
+            status=result.status.value,
+            next_action=result.next_action,
+            details=dict(result.details),
+        )

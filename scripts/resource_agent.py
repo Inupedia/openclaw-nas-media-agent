@@ -1071,8 +1071,52 @@ def hydrate_skill_env_from_openclaw(
     return []
 
 
+def hydrate_secret_env_from_files(*, only_if_missing: bool = True) -> list[str]:
+    """Load supported credential environment variables from private files."""
+    mappings = {
+        "ARIA2_RPC_SECRET": "ARIA2_RPC_SECRET_FILE",
+        "QAS_TOKEN": "QAS_TOKEN_FILE",
+    }
+    loaded: list[str] = []
+    for target_name in sorted(mappings):
+        if only_if_missing and str(os.environ.get(target_name) or "").strip():
+            continue
+        file_name = mappings[target_name]
+        configured = str(os.environ.get(file_name) or "").strip()
+        if not configured:
+            continue
+        path = Path(configured)
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise OSError("not a regular secret file")
+            mode = path.stat().st_mode & 0o777
+            if mode & 0o077:
+                raise OSError("secret file permissions are too broad")
+            value = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise AgentError(
+                f"unable to read secret file for {target_name}: {type(error).__name__}",
+                code="SECRET_FILE_UNAVAILABLE",
+                next_action="fix_secret_file_mount",
+            ) from None
+        if value.endswith("\r\n"):
+            value = value[:-2]
+        elif value.endswith("\n"):
+            value = value[:-1]
+        if not value:
+            raise AgentError(
+                f"secret file for {target_name} is empty",
+                code="SECRET_FILE_EMPTY",
+                next_action="fill_secret_file",
+            )
+        os.environ[target_name] = value
+        loaded.append(target_name)
+    return loaded
+
+
 def _load_runtime(command: str | None = None, *, contract_key: str | None = None):
     hydrate_skill_env_from_openclaw()
+    hydrate_secret_env_from_files()
     base_dir = Path(__file__).resolve().parents[1]
     with open(
         base_dir / "config" / "routing.json",

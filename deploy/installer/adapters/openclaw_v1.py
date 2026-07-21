@@ -230,7 +230,7 @@ class OpenClawV1Adapter:
                     "exclusions": sorted(_EXCLUDED_NAMES | _EXCLUDED_DEPLOY),
                 },
                 side_effect=True,
-                rollback={"action": "restore_tree"},
+                rollback={"action": "restore_tree", "path": str(self.paths.host_skill_path)},
             ),
             Change(
                 id="openclaw-write-config",
@@ -244,7 +244,7 @@ class OpenClawV1Adapter:
                     "execSecurity": "allowlist",
                 },
                 side_effect=True,
-                rollback={"action": "restore_file"},
+                rollback={"action": "restore_file", "target": str(self.config_path)},
             ),
             Change(
                 id="openclaw-compose-up",

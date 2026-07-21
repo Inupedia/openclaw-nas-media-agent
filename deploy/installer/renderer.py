@@ -22,6 +22,7 @@ from jinja2 import (
 
 from .command import CommandRunner
 from .config import DeploymentConfig
+from .discovery import OpenClawInstallation
 from .errors import DeploymentError
 from .versions import VersionLock
 
@@ -180,7 +181,12 @@ def build_compose_context(
     """Build a non-secret context for the dependency Compose template."""
 
     project = config.project_dir
-    proxy_ref = "${PANSOU_PROXY_URL:-}" if config.pansou.proxy.mode == "existing" else ""
+    if config.pansou.proxy.mode == "existing":
+        proxy_ref = "${PANSOU_PROXY_URL:-}"
+    elif config.pansou.proxy.mode == "managed":
+        proxy_ref = "socks5://openclaw-media-proxy:1080"
+    else:
+        proxy_ref = ""
     return {
         "images": {
             "qas": versions.image("qas"),
@@ -229,6 +235,99 @@ def build_compose_context(
         },
     }
 
+
+def build_openclaw_override_context(
+    config: DeploymentConfig,
+    installation: OpenClawInstallation,
+    *,
+    qas_token_file: Path,
+    aria2_secret_file: Path,
+) -> dict[str, object]:
+    return {
+        "service_name": installation.compose_service,
+        "downloads_host": str(config.downloads_dir),
+        "movie_host": str(config.libraries.movie),
+        "drama_host": str(config.libraries.drama),
+        "anime_host": str(config.libraries.anime),
+        "documentary_host": str(config.libraries.documentary),
+        "show_host": str(config.libraries.show),
+        "other_host": str(config.libraries.other),
+        "qas_token_file": str(Path(qas_token_file)),
+        "aria2_secret_file": str(Path(aria2_secret_file)),
+        "pansou_max_candidates": str(config.pansou.max_candidates),
+    }
+
+
+def validate_compose_stack(
+    installation: OpenClawInstallation,
+    override_path: Path,
+    runner: CommandRunner,
+) -> None:
+    argv = ["docker", "compose"]
+    for config_file in installation.compose_config_files:
+        argv.extend(["-f", str(config_file)])
+    argv.extend(["-f", str(Path(override_path)), "config", "--quiet"])
+    result = runner.run(argv, timeout=60)
+    if result.returncode != 0:
+        raise DeploymentError(
+            "OPENCLAW_OVERRIDE_VALIDATION_FAILED",
+            "rendered OpenClaw Compose override is invalid",
+            severity="blocking",
+            next_action="fix_openclaw_override",
+            details={"stderr": result.stderr[-500:]},
+        )
+
+
+def render_openclaw_override(
+    config: DeploymentConfig,
+    installation: OpenClawInstallation,
+    destination: Path,
+    *,
+    qas_token_file: Path,
+    aria2_secret_file: Path,
+    runner: CommandRunner,
+) -> RenderedFile:
+    rendered = render_template(
+        "compose.openclaw.override.yml.j2",
+        build_openclaw_override_context(
+            config,
+            installation,
+            qas_token_file=qas_token_file,
+            aria2_secret_file=aria2_secret_file,
+        ),
+        destination,
+        mode=0o644,
+    )
+    validate_compose_stack(installation, rendered.path, runner)
+    return rendered
+
+
+
+def render_proxy_compose(
+    config: DeploymentConfig,
+    versions: VersionLock,
+    secrets_root: Path,
+    destination: Path,
+    runner: CommandRunner,
+) -> RenderedFile:
+    secret_name = config.pansou.proxy.singbox_config_secret
+    if config.pansou.proxy.mode != "managed" or not secret_name:
+        raise DeploymentError(
+            "PROXY_RENDER_NOT_MANAGED",
+            "managed proxy Compose can only be rendered for managed mode",
+            next_action="configure_managed_proxy",
+        )
+    rendered = render_template(
+        "compose.proxy.yml.j2",
+        {
+            "image": versions.image("sing_box"),
+            "config_path": str(Path(secrets_root) / secret_name),
+        },
+        destination,
+        mode=0o644,
+    )
+    validate_compose(rendered.path, runner)
+    return rendered
 
 def _is_under(path: Path, root: Path) -> bool:
     try:

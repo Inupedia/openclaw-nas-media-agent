@@ -163,6 +163,7 @@ def apply_plan(
     completed: list[Change] = [
         change for change in plan.changes if change.id in set(completed_ids)
     ]
+    degraded = str(journal.get("status") or "") == DeploymentStatus.DEGRADED.value
     _write_journal(journal_path, journal)
 
     for change in plan.changes:
@@ -182,6 +183,10 @@ def apply_plan(
                     tuple(completed_ids),
                     str(journal["nextAction"]),
                 )
+            if isinstance(outcome, Mapping) and str(outcome.get("status") or "") == DeploymentStatus.DEGRADED.value:
+                degraded = True
+                journal["status"] = DeploymentStatus.DEGRADED.value
+                journal["nextAction"] = str(outcome.get("nextAction") or "review_optional_component")
             completed.append(change)
             completed_ids.append(change.id)
             journal["completedChangeIds"] = completed_ids
@@ -214,9 +219,36 @@ def apply_plan(
                 tuple(all_errors),
             )
 
+    final_status = DeploymentStatus.DEGRADED if degraded else DeploymentStatus.READY
     if context.verify_safe is not None:
         try:
-            context.verify_safe()
+            outcome = context.verify_safe()
+            outcome_status = getattr(outcome, "status", None)
+            if outcome_status == DeploymentStatus.MANUAL_ACTION_REQUIRED:
+                next_action = str(
+                    getattr(outcome, "next_action", None)
+                    or "complete_safe_verification"
+                )
+                journal["status"] = DeploymentStatus.MANUAL_ACTION_REQUIRED.value
+                journal["nextAction"] = next_action
+                _write_journal(journal_path, journal)
+                return DeploymentResult(
+                    deployment_id,
+                    DeploymentStatus.MANUAL_ACTION_REQUIRED,
+                    tuple(completed_ids),
+                    next_action,
+                )
+            if outcome_status == DeploymentStatus.FAILED:
+                raise DeploymentError(
+                    "SAFE_VERIFICATION_FAILED",
+                    "safe verification failed",
+                    next_action=str(
+                        getattr(outcome, "next_action", None)
+                        or "inspect_safe_verification"
+                    ),
+                )
+            if outcome_status == DeploymentStatus.DEGRADED:
+                final_status = DeploymentStatus.DEGRADED
         except Exception as error:
             original = {
                 "code": getattr(error, "code", "SAFE_VERIFICATION_FAILED"),
@@ -241,12 +273,12 @@ def apply_plan(
                 tuple(all_errors),
             )
 
-    journal["status"] = "ready"
+    journal["status"] = final_status.value
     journal["nextAction"] = "none"
     _write_journal(journal_path, journal)
     return DeploymentResult(
         deployment_id,
-        DeploymentStatus.READY,
+        final_status,
         tuple(completed_ids),
     )
 

@@ -28,6 +28,16 @@ class CliEndToEndTests(unittest.TestCase):
         raw["nas"]["organizing_dir"] = str(self.project / "organizing")
         for name in raw["nas"]["libraries"]:
             raw["nas"]["libraries"][name] = str(self.project / "media" / name)
+        workspace = self.project / "openclaw-workspace"
+        workspace.mkdir()
+        openclaw_config = workspace / "openclaw.json"
+        fixture = (
+            Path(__file__).resolve().parents[1]
+            / "fixtures/openclaw-v1/config.json"
+        )
+        openclaw_config.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+        raw["openclaw"]["workspace_host_dir"] = str(workspace)
+        raw["openclaw"]["config_host_path"] = str(openclaw_config)
         source.write_text(yaml.safe_dump(raw), encoding="utf-8")
         self.source = source
         versions = Path(__file__).resolve().parents[2] / "deploy/versions.yaml"
@@ -44,12 +54,19 @@ class CliEndToEndTests(unittest.TestCase):
             "write_file",
             "create_network",
             "compose_up",
+            "copy_tree",
+            "http_config_update",
+            "restart_container",
+            "run_verification",
         }
         rollback_names = {
             "remove_empty_directory",
             "restore_file",
             "remove_network",
             "compose_down",
+            "remove_file",
+            "restore_tree",
+            "restart_container",
         }
         return ExecutionContext(
             runtime,
@@ -91,9 +108,16 @@ class CliEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         secret_dir = self.project / "deploy/secrets"
+        secret_values = {
+            "pansou_proxy_url": "socks5://127.0.0.1:1080",
+            "qas_webui_password": "fixture-password",
+            "qas_token": "",
+            "quark_cookie": "fixture-cookie",
+            "aria2_rpc_secret": "fixture-aria-secret",
+            "full_test_share_url": "",
+        }
         for path in secret_dir.iterdir():
-            value = "socks5://127.0.0.1:1080" if path.name == "pansou_proxy_url" else "sentinel"
-            path.write_text(value)
+            path.write_text(secret_values.get(path.name, ""))
             path.chmod(0o600)
 
         self.assertEqual(self.command(["discover"])[1]["status"], "ready")
@@ -126,6 +150,7 @@ class CliEndToEndTests(unittest.TestCase):
             for path in (self.project / "deploy/runtime").rglob("*.json")
         )
         self.assertNotIn("socks5://127.0.0.1:1080", artifact_text)
+        self.assertNotIn("fixture-aria-secret", artifact_text)
 
 
 if __name__ == "__main__":

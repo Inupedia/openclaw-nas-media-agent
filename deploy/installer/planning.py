@@ -83,17 +83,25 @@ def _safe_changes(
         if not isinstance(redacted, Mapping):
             raise DeploymentError("PLAN_CHANGE_INVALID", "deployment change is invalid")
         normalized = Change.from_dict(redacted)
-        final_digest = canonical_digest(normalized.after)
-        existing = target_states.get(normalized.target)
-        if existing is not None and existing != final_digest:
-            raise DeploymentError(
-                "PLAN_TARGET_CONFLICT",
-                "multiple changes produce different final states for one target",
-                severity="security_block",
-                next_action="fix_change_generation",
-                details={"target": normalized.target},
-            )
-        target_states[normalized.target] = final_digest
+        if normalized.action in {
+            "write_file",
+            "copy_tree",
+            "http_config_update",
+            "set_mode",
+            "set_owner",
+            "set_acl",
+        }:
+            final_digest = canonical_digest(normalized.after)
+            existing = target_states.get(normalized.target)
+            if existing is not None and existing != final_digest:
+                raise DeploymentError(
+                    "PLAN_TARGET_CONFLICT",
+                    "multiple changes produce different final states for one target",
+                    severity="security_block",
+                    next_action="fix_change_generation",
+                    details={"target": normalized.target},
+                )
+            target_states[normalized.target] = final_digest
         safe.append(normalized)
     return tuple(sorted(safe, key=lambda item: (_PHASE_ORDER[item.phase], item.id)))
 

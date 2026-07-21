@@ -619,6 +619,34 @@ class ResourceAgentTests(unittest.TestCase):
         self.assertNotIn(environment["PANSOU_BASE_URL"], repr(pansou))
         runtime[1].close()
 
+    def test_hydrate_secret_env_from_read_only_files(self):
+        import resource_agent
+
+        loader = getattr(resource_agent, "hydrate_secret_env_from_files", None)
+        self.assertTrue(callable(loader), "secret-file environment loader is missing")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            qas = root / "qas_token"
+            aria = root / "aria_secret"
+            qas.write_text("derived-token\n", encoding="utf-8")
+            aria.write_text("aria-secret\n", encoding="utf-8")
+            qas.chmod(0o600)
+            aria.chmod(0o600)
+            with patch.dict(
+                os.environ,
+                {
+                    "QAS_TOKEN_FILE": str(qas),
+                    "ARIA2_RPC_SECRET_FILE": str(aria),
+                },
+                clear=False,
+            ):
+                os.environ.pop("QAS_TOKEN", None)
+                os.environ.pop("ARIA2_RPC_SECRET", None)
+                loaded = loader()
+                self.assertEqual(loaded, ["ARIA2_RPC_SECRET", "QAS_TOKEN"])
+                self.assertEqual(os.environ["QAS_TOKEN"], "derived-token")
+                self.assertEqual(os.environ["ARIA2_RPC_SECRET"], "aria-secret")
+
     def test_hydrate_skill_env_from_openclaw_fills_missing(self):
         from resource_agent import hydrate_skill_env_from_openclaw
 

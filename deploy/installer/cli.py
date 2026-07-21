@@ -19,6 +19,21 @@ from .business_verifier import (
     verify_safe,
 )
 from .command import CommandRunner
+from .component_integration import (
+    atomic_write_secret,
+    build_component_changes,
+    effective_qas_token,
+    openclaw_env_refs,
+    qas_desired_state,
+    require_ready,
+    resolve_openclaw_config_path,
+    wait_for_file,
+)
+from .adapters.aria2 import Aria2Adapter
+from .adapters.openclaw_v1 import OpenClawV1Adapter
+from .adapters.pansou import PanSouAdapter
+from .adapters.proxy import ProxyAdapter
+from .adapters.qas_v1 import QasV1Adapter
 from .config import config_digest, load_config
 from .discovery import discover
 from .errors import DeploymentError
@@ -171,9 +186,15 @@ def run_discover(
     )
 
 
-def _default_changes(root: Path, config, runtime: RuntimePaths) -> tuple[Change, ...]:
+def _default_changes(root: Path, config, secrets: SecretStore, report, runtime: RuntimePaths, runner: CommandRunner, versions: VersionLock) -> tuple[Change, ...]:
     compose_target = config.project_dir / "compose.dependencies.yml"
+    proxy_target = config.project_dir / "compose.proxy.yml"
     routing_target = root / "config/routing.json"
+    compose_argv = ["docker", "compose", "-f", str(compose_target)]
+    if config.pansou.proxy.mode == "managed":
+        compose_argv.extend(["-f", str(proxy_target)])
+    compose_argv.extend(["up", "-d"])
+    compose_down_argv = [*compose_argv[:-2], "down"]
     directories = (
         config.project_dir,
         config.project_dir / "qas/config",
@@ -237,24 +258,17 @@ def _default_changes(root: Path, config, runtime: RuntimePaths) -> tuple[Change,
                 "compose_up",
                 "openclaw-media-dependencies",
                 after={
-                    "argv": [
-                        "docker",
-                        "compose",
-                        "-f",
-                        str(compose_target),
-                        "up",
-                        "-d",
-                    ]
+                    "argv": compose_argv
                 },
                 side_effect=True,
                 rollback={
                     "action": "compose_down",
-                    "argv": ["docker", "compose", "-f", str(compose_target), "down"],
+                    "argv": compose_down_argv,
                 },
             ),
         ]
     )
-    return tuple(changes)
+    return tuple(changes) + build_component_changes(root, config, secrets, report, runtime, runner, versions)
 
 
 def run_plan(
@@ -273,7 +287,7 @@ def run_plan(
     atomic_write_json(runtime.discovery_report, report.to_dict())
     versions = VersionLock.load(root / "deploy/versions.yaml")
     render_and_validate(config, versions, runtime.rendered_dir, active_runner)
-    selected_changes = _default_changes(root, config, runtime) if changes is None else tuple(changes)
+    selected_changes = _default_changes(root, config, secrets, report, runtime, active_runner, versions) if changes is None else tuple(changes)
     plan = build_plan(
         config,
         secrets,
@@ -324,11 +338,66 @@ def _execution_environment(config, secrets: SecretStore) -> dict[str, str]:
     return environment
 
 
+def _mediactl_environment(config, secrets: SecretStore) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "QAS_BASE_URL": f"http://127.0.0.1:{config.qas.port}",
+            "QAS_TOKEN": effective_qas_token(config, secrets),
+            "ARIA2_RPC_URL": f"http://127.0.0.1:{config.aria2.rpc_port}/jsonrpc",
+            "ARIA2_RPC_SECRET": secrets.read(config.aria2.rpc_secret),
+            "PANSOU_MAX_CANDIDATES": str(config.pansou.max_candidates),
+        }
+    )
+    if config.pansou.enabled:
+        environment["PANSOU_BASE_URL"] = f"http://127.0.0.1:{config.pansou.port}"
+    return environment
+
+
+def _build_safe_verify_callback(
+    root: Path,
+    config,
+    secrets: SecretStore,
+    executor: Callable[[Sequence[str]], object],
+) -> Callable[[], object]:
+    context = BusinessVerificationContext(
+        Path(root) / "bin/mediactl",
+        config,
+        secrets,
+        executor,
+        False,
+    )
+
+    def callback():
+        return verify_safe(context)
+
+    return callback
+
+
+def _subprocess_mediactl_with_env(
+    environment: Mapping[str, str],
+) -> Callable[[Sequence[str]], object]:
+    safe_environment = {str(key): str(value) for key, value in environment.items()}
+
+    def execute(argv: Sequence[str]):
+        return subprocess.run(
+            list(argv),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+            env=safe_environment,
+        )
+
+    return execute
+
+
 def _default_execution_context(
     root: Path,
     config,
     secrets: SecretStore,
     runtime: RuntimePaths,
+    report,
     *,
     verify_safe_callback: Callable[[], object] | None,
 ) -> ExecutionContext:
@@ -338,6 +407,27 @@ def _default_execution_context(
         secret_values=[secrets.read(name) for name in config.secret_names()],
     )
 
+    openclaw_config_path = resolve_openclaw_config_path(config, report)
+    openclaw_adapter = OpenClawV1Adapter(
+        report.openclaw,
+        openclaw_config_path,
+        root,
+        runner=runner,
+    )
+    qas_config_path = config.project_dir / "qas" / "config" / "config" / "quark_config.json"
+    qas_adapter = QasV1Adapter(qas_config_path, f"http://127.0.0.1:{config.qas.port}")
+    desired_qas = qas_desired_state(config, secrets)
+    versions = VersionLock.load(root / "deploy/versions.yaml")
+    pansou_adapter = PanSouAdapter(config.pansou, secrets)
+    proxy_adapter = ProxyAdapter(config.pansou.proxy, secrets, versions)
+    aria2_adapter = Aria2Adapter(
+        "openclaw-media-aria2",
+        f"http://127.0.0.1:{config.aria2.rpc_port}/jsonrpc",
+        secrets.read(config.aria2.rpc_secret),
+        config.downloads_dir,
+        runner=runner,
+    )
+
     def create_directory(change: Change):
         path = Path(change.target)
         path.mkdir(parents=True, exist_ok=True)
@@ -345,11 +435,70 @@ def _default_execution_context(
         os.chmod(path, mode)
 
     def write_file(change: Change):
+        if change.component == "derived_secret":
+            atomic_write_secret(Path(change.target), effective_qas_token(config, secrets))
+            return
+        if change.id == "openclaw-write-config":
+            openclaw_adapter.apply_config(
+                openclaw_env_refs(config),
+                runtime.root / "component-backups" / "openclaw.json",
+            )
+            return
         after = change.after if isinstance(change.after, Mapping) else {}
         source = Path(str(after.get("source") or ""))
         if not source.is_file():
             raise DeploymentError("WRITE_SOURCE_MISSING", "planned rendered source is missing", next_action="run_plan")
         _copy_atomic(source, Path(change.target), int(str(after.get("mode", "0600")), 8))
+
+    def copy_tree(change: Change):
+        if change.component != "openclaw":
+            raise DeploymentError("COPY_TREE_UNSUPPORTED", "unsupported copy_tree component")
+        openclaw_adapter.install_skill()
+
+    def http_config_update(change: Change):
+        if change.component != "qas":
+            raise DeploymentError("HTTP_CONFIG_UNSUPPORTED", "unsupported configuration component")
+        wait_for_file(qas_config_path)
+        qas_adapter.apply_config(
+            desired_qas,
+            runtime.root / "component-backups" / "qas-config.json",
+        )
+
+    def restart_container(change: Change):
+        after = change.after if isinstance(change.after, Mapping) else {}
+        container = str(after.get("container") or change.target).strip()
+        if not container:
+            raise DeploymentError("CONTAINER_NAME_MISSING", "container restart target is missing")
+        result = runner.run(["docker", "restart", container], timeout=180)
+        if result.returncode != 0:
+            raise DeploymentError("CONTAINER_RESTART_FAILED", "container restart failed", next_action="inspect_container_logs", details={"container": container})
+
+    def run_verification(change: Change):
+        if change.component == "qas":
+            require_ready(qas_adapter.verify(desired_qas), component="qas")
+            return
+        if change.component == "openclaw":
+            require_ready(openclaw_adapter.verify(), component="openclaw")
+            return
+        if change.component == "aria2":
+            identity = aria2_adapter.runtime_identity()
+            require_ready(aria2_adapter.verify_rpc(), component="aria2_rpc")
+            require_ready(aria2_adapter.verify_mount(config.downloads_dir), component="aria2_mount")
+            return {"status": "ready", "identity": identity.to_dict()}
+        if change.component == "pansou":
+            result = pansou_adapter.verify()
+            if result.status.value == "degraded":
+                return {"status": "degraded", "nextAction": result.next_action}
+            require_ready(result, component="pansou")
+            return
+        if change.component == "proxy":
+            result = proxy_adapter.verify(runner)
+            if result.status.value == "degraded":
+                return {"status": "degraded", "nextAction": result.next_action}
+            if result.status.value != "skipped":
+                require_ready(result, component="proxy")
+            return
+        raise DeploymentError("VERIFICATION_COMPONENT_UNSUPPORTED", "unsupported verification component")
 
     def create_network(change: Change):
         inspected = runner.run(["docker", "network", "inspect", change.target])
@@ -370,13 +519,63 @@ def _default_execution_context(
     handlers = {
         "create_directory": create_directory,
         "write_file": write_file,
+        "copy_tree": copy_tree,
         "create_network": create_network,
         "compose_up": compose_up,
+        "http_config_update": http_config_update,
+        "restart_container": restart_container,
+        "run_verification": run_verification,
+    }
+
+    def remove_empty_directory(data):
+        path = Path(str(data.get("path") or ""))
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+    def remove_file(data):
+        Path(str(data.get("path") or "")).unlink(missing_ok=True)
+
+    def remove_network(data):
+        name = str(data.get("name") or "")
+        if name:
+            runner.run(["docker", "network", "rm", name])
+
+    def compose_down(data):
+        argv = data.get("argv")
+        if isinstance(argv, list) and argv:
+            runner.run([str(item) for item in argv], timeout=180)
+
+    def restore_file(data):
+        source_raw = str(data.get("source") or "").strip()
+        target_raw = str(data.get("target") or "").strip()
+        if not source_raw or not target_raw:
+            return
+        source = Path(source_raw)
+        target = Path(target_raw)
+        if source.is_file():
+            _copy_atomic(source, target, 0o600)
+
+    def restore_tree(data):
+        target = Path(str(data.get("path") or ""))
+        if target.is_dir():
+            shutil.rmtree(target)
+
+    rollback_handlers = {
+        "remove_empty_directory": remove_empty_directory,
+        "remove_file": remove_file,
+        "remove_network": remove_network,
+        "compose_down": compose_down,
+        "restore_file": restore_file,
+        "restore_tree": restore_tree,
+        "restart_container": lambda data: runner.run(["docker", "restart", str(data.get("container") or "")], timeout=180),
     }
     return ExecutionContext(
         runtime,
         root,
         handlers,
+        rollback_handlers,
         verify_safe=verify_safe_callback,
     )
 
@@ -413,12 +612,21 @@ def run_apply(
     active_runner = runner or CommandRunner(cwd=root)
     report = discover(config, active_runner)
     validate_plan(plan, _current_facts(config, secrets, report, plan), int(time.time()) if now is None else int(now))
+    automatic_verify = verify_safe_callback
+    if automatic_verify is None and config.verification.safe:
+        automatic_verify = _build_safe_verify_callback(
+            root,
+            config,
+            secrets,
+            _subprocess_mediactl_with_env(_mediactl_environment(config, secrets)),
+        )
     context = execution_context or _default_execution_context(
         root,
         config,
         secrets,
         runtime,
-        verify_safe_callback=verify_safe_callback,
+        report,
+        verify_safe_callback=automatic_verify,
     )
     sources = [
         Path(change.target)
