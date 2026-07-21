@@ -15,18 +15,20 @@
 </p>
 
 <p align="center">
-  <a href="https://www.bilibili.com/video/BV1tRKB6rEsW">▶ 查看演示：解放双手，让智能体帮你管理 NAS 影音</a>
+  <a href="https://www.bilibili.com/video/BV1tRKB6rEsW">▶ 查看演示</a>
   ·
-  <a href="docs/AGENT_DEPLOY.md">让 Agent 部署</a>
+  <a href="docs/deployment/QUICKSTART.md">快速部署</a>
   ·
-  <a href="deploy/docker-compose.dependencies.yml">依赖容器示例</a>
+  <a href="docs/AGENT_DEPLOY.md">交给 Agent 部署</a>
+  ·
+  <a href="docs/deployment/TROUBLESHOOTING.md">故障排查</a>
 </p>
 
 ![OpenClaw NAS Media Agent workflow](docs/images/workflow.svg)
 
 ## 这是什么
 
-这不是一个“搜到就下”的脚本，而是一套面向 OpenClaw 的 NAS 影视管理 Skill。
+这不是一个“搜到就下”的脚本，而是一套面向 OpenClaw 的 NAS 影音管理 Skill。
 
 你可以直接对智能体说：
 
@@ -39,40 +41,18 @@
 ```
 
 ```text
-下载任务完成后先校验，告诉我准备整理到哪里，等我确认后再入库。
+下载完成后先校验，告诉我准备整理到哪里，等我确认后再入库。
 ```
 
-智能体会把本地结果、缺失内容和远端候选分开展示，不会替你擅自选择大体积版本，也不会把文件直接写进正式媒体库。
-
-## 演示效果
-
-完整演示视频：**[解放双手，让智能体帮你管理 NAS 影音](https://www.bilibili.com/video/BV1tRKB6rEsW)**
-
-一次典型对话大致如下：
-
-```text
-你：搜索《作品名》动画，先预览，不要下载。
-
-Agent：
-1. NAS 本地未发现该作品。
-2. 找到 4 组有效候选：
-   - 1080P / HEVC / 中英字幕 / 18.4 GB
-   - 1080P / AVC / 中文字幕 / 26.1 GB
-   - 4K HDR / HEVC / 中英字幕 / 73.8 GB
-   - 720P / AVC / 中文字幕 / 8.7 GB
-3. 当前未创建下载任务。请选择 candidateId。
-
-你：选择第 1 个，只下载 S01E01-S01E12。
-
-Agent：已生成下载计划，将写入下载暂存区；等待你确认执行。
-```
+智能体会把 NAS 本地结果、缺失内容和远端候选分开展示，不会替你擅自选择大体积版本，也不会把下载内容直接写进正式媒体库。
 
 ## 核心能力
 
 - **NAS 本地优先**：本地已有时，普通搜索直接停止，避免重复下载。
+- **聚合候选预览**：通过 QAS 预览夸克分享，并可使用 PanSou 补充候选来源。
 - **追更补集**：对电视剧和动画计算本地缺集，只展示增量候选。
-- **候选规格对比**：尽量提取分辨率、HDR、编码、音频、字幕、大小、文件数与集数范围。
-- **人工选版**：多个候选必须由用户选择，Agent 不自动挑选“最好版本”。
+- **候选规格对比**：尽量提取分辨率、HDR、编码、音频、字幕、大小、文件数和集数范围。
+- **人工选版**：多个候选必须由用户通过 `candidateId` 选择，Agent 不自动挑选“最好版本”。
 - **安全下载区**：新任务只进入 `.incoming`，校验成功后进入 `.ready`，异常进入 `.quarantine`。
 - **确认后入库**：下载与整理是两个独立确认步骤。
 - **任务管理**：查看、暂停、继续、取消和校验本项目创建的 aria2 任务。
@@ -97,22 +77,29 @@ flowchart LR
     R -->|用户再次确认| F[正式媒体库]
 ```
 
-各组件职责：
-
 | 组件 | 作用 | 是否必需 |
 |---|---|---|
 | OpenClaw | 理解自然语言、读取 Skill、调用固定 CLI | 是 |
-| 本项目 `mediactl` | 流程编排、安全校验、状态管理 | 是 |
+| 本项目 `mediactl` | 流程编排、安全校验和状态管理 | 是 |
 | QAS | 预览夸克分享、转存并触发下载 | 远端流程必需 |
 | PanSou | 补充候选发现，不接触 Cookie、不直接下载 | 可选 |
-| aria2 | 执行真实下载并提供 RPC 状态 | 远端流程必需 |
+| aria2 | 执行下载并提供 RPC 状态 | 远端流程必需 |
 | ffprobe | 增强视频可读性校验 | 可选 |
 
-## 确定性部署（已有 OpenClaw）
+## 确定性部署（推荐）
+
+当前版本正式支持：
+
+- 已经安装 OpenClaw 的 UGREEN UGOS；
+- 标准 Linux Docker / Docker Compose 主机；
+- 群晖、威联通、TrueNAS、Unraid 等平台可按标准 Docker 方式尝试。
 
 部署不再依赖 Agent 临场拼装命令。Agent 和人工用户都调用仓库内同一套 Python 部署器：
 
 ```bash
+git clone https://github.com/Inupedia/openclaw-nas-media-agent.git
+cd openclaw-nas-media-agent
+
 python3 deploy/cli.py init
 python3 deploy/cli.py discover
 python3 deploy/cli.py plan
@@ -120,116 +107,85 @@ python3 deploy/cli.py apply --plan-id PLAN_ID --confirmed
 python3 deploy/cli.py verify --level safe
 ```
 
-部署器使用 `deploy/config.yaml` 作为唯一配置源，使用独立 `deploy/secrets/` 保存密码、Cookie、Token 和代理配置。它负责只读发现、不可变计划、固定镜像、配置渲染、事务日志、分层验收和回滚。
+部署器会完成：
 
-只有登录、扫码、验证码、冲突选择和危险操作确认需要用户参与。首版正式支持绿联 UGOS 和标准 Linux Docker，其他 NAS 平台按实验性兼容处理。
+1. 只读识别现有 OpenClaw、Docker 网络、挂载目录和依赖容器；
+2. 生成 30 分钟有效的不可变部署计划；
+3. 使用锁定镜像和确定性模板部署或复用 QAS、PanSou、aria2；
+4. 安装 Skill，并将 OpenClaw 的执行权限收紧到固定绝对路径 `mediactl`；
+5. 初始化 QAS、配置 aria2 RPC、检查 PanSou 和代理状态；
+6. 自动执行无副作用的 `safe` 验收；
+7. 在失败时依据事务日志执行回滚。
 
-详细步骤见 **[快速部署](docs/deployment/QUICKSTART.md)** 和 **[已有 OpenClaw 模式](docs/deployment/EXISTING_OPENCLAW.md)**。
+### 配置和密钥
 
-## 手动部署
-
-### 1. 准备依赖容器
-
-仓库提供了一个可复制修改的依赖栈：
-
-```bash
-mkdir -p /volume1/docker/openclaw-media
-cd /volume1/docker/openclaw-media
-
-curl -O https://raw.githubusercontent.com/Inupedia/openclaw-nas-media-agent/main/deploy/docker-compose.dependencies.yml
-curl -O https://raw.githubusercontent.com/Inupedia/openclaw-nas-media-agent/main/deploy/.env.dependencies.example
-cp .env.dependencies.example .env
-```
-
-修改 `.env` 中的主机目录、端口和密钥后：
-
-```bash
-docker compose -f docker-compose.dependencies.yml config
-docker compose -f docker-compose.dependencies.yml up -d
-docker compose -f docker-compose.dependencies.yml ps
-```
-
-> Compose 示例主要帮助 Agent 理解 QAS、PanSou 与 aria2 的关系。不同 NAS 的目录、UID/GID、网络模式和已有容器不同，部署前必须调整。
-
-### 2. 安装 Skill
-
-以下仅以 `/volume4/openclaw` 为例：
-
-```bash
-cd /volume4/openclaw/skills
-git clone https://github.com/Inupedia/openclaw-nas-media-agent.git resource-download-agent
-chmod 0755 resource-download-agent/bin/mediactl
-mkdir -p /volume4/openclaw/data/resource-download-agent
-```
-
-容器内常见执行路径：
+`deploy/config.yaml` 是唯一普通配置源；密码、Cookie、Token 和代理地址保存在独立目录：
 
 ```text
-/root/.openclaw/workspace/skills/resource-download-agent/bin/mediactl
+deploy/secrets/
+├── qas_webui_password
+├── qas_token
+├── quark_cookie
+├── aria2_rpc_secret
+└── pansou_proxy_url
 ```
 
-### 3. 配置挂载
+部署器要求 secrets 目录权限为 `0700`、文件权限为 `0600`，并通过只读文件挂载把凭据交给 OpenClaw。计划、日志和验收报告不会保存真实密钥值。
 
-推荐路径对应关系：
+### 需要人工参与的情况
 
-| 主机目录 | OpenClaw 容器 | aria2 容器 |
-|---|---|---|
-| 下载目录 | 与 `agent_root` 一致 | `/nas/downloads` |
-| 正式影视库 | 按原路径或统一容器路径挂载 | 无需写入 |
-| 临时影视库 | 按原路径或统一容器路径挂载 | 无需写入 |
-| OpenClaw workspace | `/root/.openclaw/workspace` | 无需挂载 |
+只有以下情况会暂停并要求用户操作：
 
-关键原则：**OpenClaw 与 aria2 必须看到同一份主机下载目录，只是容器内路径可以不同。**
+- QAS 或来源网站登录、扫码、验证码；
+- 自动发现存在多个可信候选；
+- 修改目录权限、执行真实下载或其他危险操作；
+- `full` 业务验收。
 
-### 4. 配置环境变量
+### 常用部署命令
 
 ```bash
-cp .env.example .env
+python3 deploy/cli.py init
+python3 deploy/cli.py discover
+python3 deploy/cli.py plan
+python3 deploy/cli.py apply --plan-id PLAN_ID --confirmed
+python3 deploy/cli.py verify --level safe
+python3 deploy/cli.py verify --level full --confirmed
+python3 deploy/cli.py rollback
 ```
 
-至少配置：
+详细文档：
 
-```dotenv
-QAS_BASE_URL=http://qas:5005
-QAS_TOKEN=<replace-me>
-PANSOU_BASE_URL=http://pansou:8888
-PANSOU_MAX_CANDIDATES=50
-ARIA2_RPC_URL=http://aria2:6800/jsonrpc
-ARIA2_RPC_SECRET=<replace-me>
-RESOURCE_AGENT_STATE_DB=/root/.openclaw/workspace/data/resource-download-agent/state.db
+- [快速部署](docs/deployment/QUICKSTART.md)
+- [已有 OpenClaw 模式](docs/deployment/EXISTING_OPENCLAW.md)
+- [QAS 登录与初始化](docs/deployment/QAS_LOGIN.md)
+- [PanSou 与代理](docs/deployment/PROXY.md)
+- [安全说明](docs/deployment/SECURITY.md)
+- [故障排查](docs/deployment/TROUBLESHOOTING.md)
+
+> 当前版本不会从空白环境自动安装 OpenClaw 本体；请先确保 OpenClaw 已通过 Docker Compose 运行。
+
+## 演示效果
+
+完整演示视频：**[解放双手，让智能体帮你管理 NAS 影音](https://www.bilibili.com/video/BV1tRKB6rEsW)**
+
+一次典型对话大致如下：
+
+```text
+你：搜索《作品名》动画，先预览，不要下载。
+
+Agent：
+1. NAS 本地未发现该作品。
+2. 找到 4 组有效候选：
+   - 1080P / HEVC / 中英字幕 / 18.4 GB
+   - 1080P / AVC / 中文字幕 / 26.1 GB
+   - 4K HDR / HEVC / 中英字幕 / 73.8 GB
+   - 720P / AVC / 中文字幕 / 8.7 GB
+3. 当前未创建下载任务。请选择 candidateId。
+
+你：选择第 1 个，只下载 S01E01-S01E12。
+
+Agent：已生成下载计划，将写入下载暂存区；等待你确认执行。
 ```
-
-不要提交 `.env`、Cookie、Token、RPC Secret、Authorization Header 或真实内网地址。
-
-### 5. 修改媒体路由
-
-编辑 `config/routing.json`，至少核对：
-
-- `downloads.host_root`
-- `downloads.agent_root`
-- `downloads.aria2_root`
-- 各媒体类型的 `final_root`
-- `paths.protected_roots`
-- `paths.organizing_root`
-
-正式媒体库必须预先挂载存在；程序不会在挂载失效时自动创建“假目录”。
-
-### 6. 验收
-
-```bash
-python3 -m unittest discover -s tests -v
-bin/mediactl check-ready
-bin/mediactl search "测试作品" --media-type anime
-```
-
-验收应满足：
-
-1. `check-ready` 返回 `nextAction: ready`。
-2. 普通搜索发现本地已有作品时停止远端搜索。
-3. “只预览”不会创建下载任务。
-4. 多个候选分别显示规格，不自动选版。
-5. 更新模式只返回缺集。
-6. 受保护媒体库的删除请求直接拒绝。
 
 ## 用户命令示例
 
@@ -243,10 +199,6 @@ bin/mediactl search "测试作品" --media-type anime
 
 ```text
 列出当前下载任务和进度。
-```
-
-```text
-暂停任务 TASK_ID。
 ```
 
 ```text
@@ -284,19 +236,47 @@ bin/mediactl organize execute PLAN_ID --confirmed
 - 不要为排错向 Agent 开放任意 shell、`rm`、`curl`、Python 或 sudo。
 - 本项目仅用于管理你拥有、制作或已获授权使用的媒体内容；请遵守所在地法律、平台条款和版权许可。
 
+## 手动部署（高级）
+
+不建议新用户从这里开始。手动方式主要用于调试部署器或适配特殊 Docker 环境。
+
+仓库仍保留：
+
+- `deploy/docker-compose.dependencies.yml`：渲染后的依赖栈参考；
+- `.env.example`：Skill 运行时环境变量参考；
+- `config/routing.json`：媒体路径与保护目录参考。
+
+手动配置时至少需要理解以下变量：
+
+```dotenv
+QAS_BASE_URL=http://qas:5005
+QAS_TOKEN=<replace-me>
+PANSOU_BASE_URL=http://pansou:8888
+ARIA2_RPC_URL=http://aria2:6800/jsonrpc
+ARIA2_RPC_SECRET=<replace-me>
+```
+
+OpenClaw 与 aria2 必须挂载同一份主机下载目录；aria2 容器内推荐路径为 `/nas/downloads`。不要把正式媒体库直接配置成下载目录，也不要提交 `.env`、Cookie、Token、RPC Secret 或真实内网地址。
+
+手动安装 Skill 的仓库地址：
+
+```bash
+git clone https://github.com/Inupedia/openclaw-nas-media-agent.git resource-download-agent
+```
+
 ## 常见问题
 
 ### `check-ready` 报下载目录不可写
 
-确认 `.incoming`、`.ready`、`.quarantine` 已创建，并且 OpenClaw 与 aria2 的运行用户都有写权限。不要简单对整个媒体库开放权限。
+确认 `.incoming`、`.ready`、`.quarantine` 已创建，并且 OpenClaw 与 aria2 的运行用户拥有实际写权限。不要简单对整个媒体库开放 `0777`。
 
 ### aria2 能连接，但下载路径不对
 
 确认同一个主机下载目录在 aria2 容器内映射为 `/nas/downloads`，并核对 `routing.json` 的 `aria2_root`。
 
-### 搜索结果很少
+### PanSou 容器正常，但没有 Telegram 候选
 
-候选会经过分享有效性、空目录、纯压缩包、无视频文件等过滤。结果少不等于搜索失败，可查看 JSON 中的拒绝计数。
+这通常是代理或 Telegram 网络访问问题。核心 QAS 下载链路仍可使用时，部署器会把状态标记为 `degraded`，而不是误报整个系统不可用。
 
 ### 为什么不自动选择 4K
 
@@ -304,9 +284,10 @@ bin/mediactl organize execute PLAN_ID --confirmed
 
 ## 兼容性
 
-- 已验证：UGREEN NAS、Docker、OpenClaw、QAS、aria2。
-- 可适配：群晖、威联通、TrueNAS、Unraid 和普通 Linux Docker 主机。
-- 未验证平台需要检查路径、权限、网络和 Python 版本。
+- **正式验证范围**：标准 Linux Docker / Docker Compose，Python 3.10、3.11、3.12。
+- **优先支持**：UGREEN UGOS。
+- **可尝试适配**：群晖、威联通、TrueNAS、Unraid。
+- 不同 NAS 的差异主要集中在卷路径、ACL、UID/GID、Docker UI 和网络设置；部署器会先发现、生成计划并执行写入探针。
 
 ## License
 
