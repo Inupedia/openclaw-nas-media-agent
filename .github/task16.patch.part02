@@ -1,0 +1,330 @@
+diff --git a/deploy/installer/executor.py b/deploy/installer/executor.py
+index 8eb5830..eeeec77 100644
+--- a/deploy/installer/executor.py
++++ b/deploy/installer/executor.py
+@@ -163,6 +163,7 @@ def apply_plan(
+     completed: list[Change] = [
+         change for change in plan.changes if change.id in set(completed_ids)
+     ]
++    degraded = str(journal.get("status") or "") == DeploymentStatus.DEGRADED.value
+     _write_journal(journal_path, journal)
+ 
+     for change in plan.changes:
+@@ -182,6 +183,10 @@ def apply_plan(
+                     tuple(completed_ids),
+                     str(journal["nextAction"]),
+                 )
++            if isinstance(outcome, Mapping) and str(outcome.get("status") or "") == DeploymentStatus.DEGRADED.value:
++                degraded = True
++                journal["status"] = DeploymentStatus.DEGRADED.value
++                journal["nextAction"] = str(outcome.get("nextAction") or "review_optional_component")
+             completed.append(change)
+             completed_ids.append(change.id)
+             journal["completedChangeIds"] = completed_ids
+@@ -214,9 +219,36 @@ def apply_plan(
+                 tuple(all_errors),
+             )
+ 
++    final_status = DeploymentStatus.DEGRADED if degraded else DeploymentStatus.READY
+     if context.verify_safe is not None:
+         try:
+-            context.verify_safe()
++            outcome = context.verify_safe()
++            outcome_status = getattr(outcome, "status", None)
++            if outcome_status == DeploymentStatus.MANUAL_ACTION_REQUIRED:
++                next_action = str(
++                    getattr(outcome, "next_action", None)
++                    or "complete_safe_verification"
++                )
++                journal["status"] = DeploymentStatus.MANUAL_ACTION_REQUIRED.value
++                journal["nextAction"] = next_action
++                _write_journal(journal_path, journal)
++                return DeploymentResult(
++                    deployment_id,
++                    DeploymentStatus.MANUAL_ACTION_REQUIRED,
++                    tuple(completed_ids),
++                    next_action,
++                )
++            if outcome_status == DeploymentStatus.FAILED:
++                raise DeploymentError(
++                    "SAFE_VERIFICATION_FAILED",
++                    "safe verification failed",
++                    next_action=str(
++                        getattr(outcome, "next_action", None)
++                        or "inspect_safe_verification"
++                    ),
++                )
++            if outcome_status == DeploymentStatus.DEGRADED:
++                final_status = DeploymentStatus.DEGRADED
+         except Exception as error:
+             original = {
+                 "code": getattr(error, "code", "SAFE_VERIFICATION_FAILED"),
+@@ -241,12 +273,12 @@ def apply_plan(
+                 tuple(all_errors),
+             )
+ 
+-    journal["status"] = "ready"
++    journal["status"] = final_status.value
+     journal["nextAction"] = "none"
+     _write_journal(journal_path, journal)
+     return DeploymentResult(
+         deployment_id,
+-        DeploymentStatus.READY,
++        final_status,
+         tuple(completed_ids),
+     )
+ 
+diff --git a/deploy/installer/planning.py b/deploy/installer/planning.py
+index c45a148..94cf8df 100644
+--- a/deploy/installer/planning.py
++++ b/deploy/installer/planning.py
+@@ -83,17 +83,25 @@ def _safe_changes(
+         if not isinstance(redacted, Mapping):
+             raise DeploymentError("PLAN_CHANGE_INVALID", "deployment change is invalid")
+         normalized = Change.from_dict(redacted)
+-        final_digest = canonical_digest(normalized.after)
+-        existing = target_states.get(normalized.target)
+-        if existing is not None and existing != final_digest:
+-            raise DeploymentError(
+-                "PLAN_TARGET_CONFLICT",
+-                "multiple changes produce different final states for one target",
+-                severity="security_block",
+-                next_action="fix_change_generation",
+-                details={"target": normalized.target},
+-            )
+-        target_states[normalized.target] = final_digest
++        if normalized.action in {
++            "write_file",
++            "copy_tree",
++            "http_config_update",
++            "set_mode",
++            "set_owner",
++            "set_acl",
++        }:
++            final_digest = canonical_digest(normalized.after)
++            existing = target_states.get(normalized.target)
++            if existing is not None and existing != final_digest:
++                raise DeploymentError(
++                    "PLAN_TARGET_CONFLICT",
++                    "multiple changes produce different final states for one target",
++                    severity="security_block",
++                    next_action="fix_change_generation",
++                    details={"target": normalized.target},
++                )
++            target_states[normalized.target] = final_digest
+         safe.append(normalized)
+     return tuple(sorted(safe, key=lambda item: (_PHASE_ORDER[item.phase], item.id)))
+ 
+diff --git a/deploy/installer/renderer.py b/deploy/installer/renderer.py
+index 5712644..23d381f 100644
+--- a/deploy/installer/renderer.py
++++ b/deploy/installer/renderer.py
+@@ -22,6 +22,7 @@ from jinja2 import (
+ 
+ from .command import CommandRunner
+ from .config import DeploymentConfig
++from .discovery import OpenClawInstallation
+ from .errors import DeploymentError
+ from .versions import VersionLock
+ 
+@@ -180,7 +181,12 @@ def build_compose_context(
+     """Build a non-secret context for the dependency Compose template."""
+ 
+     project = config.project_dir
+-    proxy_ref = "${PANSOU_PROXY_URL:-}" if config.pansou.proxy.mode == "existing" else ""
++    if config.pansou.proxy.mode == "existing":
++        proxy_ref = "${PANSOU_PROXY_URL:-}"
++    elif config.pansou.proxy.mode == "managed":
++        proxy_ref = "socks5://openclaw-media-proxy:1080"
++    else:
++        proxy_ref = ""
+     return {
+         "images": {
+             "qas": versions.image("qas"),
+@@ -230,6 +236,99 @@ def build_compose_context(
+     }
+ 
+ 
++def build_openclaw_override_context(
++    config: DeploymentConfig,
++    installation: OpenClawInstallation,
++    *,
++    qas_token_file: Path,
++    aria2_secret_file: Path,
++) -> dict[str, object]:
++    return {
++        "service_name": installation.compose_service,
++        "downloads_host": str(config.downloads_dir),
++        "movie_host": str(config.libraries.movie),
++        "drama_host": str(config.libraries.drama),
++        "anime_host": str(config.libraries.anime),
++        "documentary_host": str(config.libraries.documentary),
++        "show_host": str(config.libraries.show),
++        "other_host": str(config.libraries.other),
++        "qas_token_file": str(Path(qas_token_file)),
++        "aria2_secret_file": str(Path(aria2_secret_file)),
++        "pansou_max_candidates": str(config.pansou.max_candidates),
++    }
++
++
++def validate_compose_stack(
++    installation: OpenClawInstallation,
++    override_path: Path,
++    runner: CommandRunner,
++) -> None:
++    argv = ["docker", "compose"]
++    for config_file in installation.compose_config_files:
++        argv.extend(["-f", str(config_file)])
++    argv.extend(["-f", str(Path(override_path)), "config", "--quiet"])
++    result = runner.run(argv, timeout=60)
++    if result.returncode != 0:
++        raise DeploymentError(
++            "OPENCLAW_OVERRIDE_VALIDATION_FAILED",
++            "rendered OpenClaw Compose override is invalid",
++            severity="blocking",
++            next_action="fix_openclaw_override",
++            details={"stderr": result.stderr[-500:]},
++        )
++
++
++def render_openclaw_override(
++    config: DeploymentConfig,
++    installation: OpenClawInstallation,
++    destination: Path,
++    *,
++    qas_token_file: Path,
++    aria2_secret_file: Path,
++    runner: CommandRunner,
++) -> RenderedFile:
++    rendered = render_template(
++        "compose.openclaw.override.yml.j2",
++        build_openclaw_override_context(
++            config,
++            installation,
++            qas_token_file=qas_token_file,
++            aria2_secret_file=aria2_secret_file,
++        ),
++        destination,
++        mode=0o644,
++    )
++    validate_compose_stack(installation, rendered.path, runner)
++    return rendered
++
++
++
++def render_proxy_compose(
++    config: DeploymentConfig,
++    versions: VersionLock,
++    secrets_root: Path,
++    destination: Path,
++    runner: CommandRunner,
++) -> RenderedFile:
++    secret_name = config.pansou.proxy.singbox_config_secret
++    if config.pansou.proxy.mode != "managed" or not secret_name:
++        raise DeploymentError(
++            "PROXY_RENDER_NOT_MANAGED",
++            "managed proxy Compose can only be rendered for managed mode",
++            next_action="configure_managed_proxy",
++        )
++    rendered = render_template(
++        "compose.proxy.yml.j2",
++        {
++            "image": versions.image("sing_box"),
++            "config_path": str(Path(secrets_root) / secret_name),
++        },
++        destination,
++        mode=0o644,
++    )
++    validate_compose(rendered.path, runner)
++    return rendered
++
+ def _is_under(path: Path, root: Path) -> bool:
+     try:
+         path.relative_to(root)
+diff --git a/deploy/templates/compose.openclaw.override.yml.j2 b/deploy/templates/compose.openclaw.override.yml.j2
+index 934cba2..9f27f31 100644
+--- a/deploy/templates/compose.openclaw.override.yml.j2
++++ b/deploy/templates/compose.openclaw.override.yml.j2
+@@ -2,7 +2,22 @@ services:
+   {{ service_name }}:
+     networks:
+       - openclaw_media
++    environment:
++      QAS_BASE_URL: "http://qas:5005"
++      QAS_TOKEN_FILE: "/run/secrets/openclaw_media_qas_token"
++      PANSOU_BASE_URL: "http://pansou:8888"
++      PANSOU_MAX_CANDIDATES: {{ pansou_max_candidates | yaml_quote }}
++      ARIA2_RPC_URL: "http://aria2:6800/jsonrpc"
++      ARIA2_RPC_SECRET_FILE: "/run/secrets/openclaw_media_aria2_rpc_secret"
+     volumes:
++      - type: bind
++        source: {{ qas_token_file | yaml_quote }}
++        target: /run/secrets/openclaw_media_qas_token
++        read_only: true
++      - type: bind
++        source: {{ aria2_secret_file | yaml_quote }}
++        target: /run/secrets/openclaw_media_aria2_rpc_secret
++        read_only: true
+       - type: bind
+         source: {{ downloads_host | yaml_quote }}
+         target: /nas/downloads
+diff --git a/docs/superpowers/reviews/2026-07-21-existing-openclaw-deployer-verification.md b/docs/superpowers/reviews/2026-07-21-existing-openclaw-deployer-verification.md
+new file mode 100644
+index 0000000..c1b5ee8
+--- /dev/null
++++ b/docs/superpowers/reviews/2026-07-21-existing-openclaw-deployer-verification.md
+@@ -0,0 +1,60 @@
++# Existing OpenClaw Deployer Verification Record
++
++**Date:** 2026-07-21
++**Branch:** `feat/existing-openclaw-deployer`
++**Plan:** `docs/superpowers/plans/2026-07-20-existing-openclaw-deployer.md`
++
++## Automated evidence
++
++- Full repository suite: `python3 -m unittest discover -s tests -v`
++  - Result: **334 tests passed**, zero failures and zero errors.
++- Static parsing:
++  - `deploy/schemas/config.schema.json`: valid JSON.
++  - `config/routing.json`: valid JSON.
++  - deployment YAML and GitHub Actions workflows: valid YAML.
++  - changed Python modules: `py_compile` succeeds.
++- Diff hygiene:
++  - `git diff --check` succeeds.
++  - no runtime secrets, generated runtime state, temporary patch jobs, or writable CI permissions are part of the intended final change.
++
++## Approved-design coverage
++
++| Requirement | Evidence |
++|---|---|
++| `deploy/config.yaml` is the source of truth | strict loader/schema, initializer and CLI end-to-end tests |
++| Secret directory/file modes | `SecretStore`, initializer and runtime tests enforce `0700`/`0600` |
++| Immutable 30-minute plans | plan expiry and four-dimension drift tests |
++| Immutable container images | digest-only `versions.yaml` and renderer tests |
++| QAS config/API/browser fallback | locked v0.8.7 adapter and fallback tests |
++| PanSou degraded state | adapter and executor aggregation tests |
++| Existing and managed proxy modes | proxy validation, internal-only sing-box Compose and default-plan integration tests |
++| aria2 identity, RPC and mount mapping | adapter and default verification integration tests |
++| Narrow aria2 permissions | permission-strategy and effective-write tests |
++| Existing OpenClaw integration | supported-profile adapter, override and Skill installation tests |
++| Fixed command allowlist | OpenClaw adapter and Skill contract tests |
++| File-based credentials | OpenClaw override, Skill metadata and resource-agent hydration tests |
++| Transaction rollback and resume | executor, backup and rollback tests |
++| Automatic safe verification | executor and default callback integration tests |
++| Confirmed full verification | three independent gates and bounded-download tests |
++| Protected formal media roots | config, routing, path guard and L4 verification tests |
++
++## Final integration findings resolved
++
++The final coverage review found that QAS/OpenClaw, PanSou/proxy and aria2 adapters existed independently but were not all invoked by the default plan. The default flow now:
++
++1. renders and writes dependency, OpenClaw override and optional managed-proxy Compose files;
++2. derives the locked QAS API token into a private runtime secret file;
++3. initializes and verifies QAS;
++4. installs/configures/verifies the OpenClaw Skill and fixed `mediactl` allowlist;
++5. verifies aria2 runtime identity, authenticated RPC and shared mount mapping;
++6. verifies PanSou and optional sing-box, preserving a usable deployment as `degraded` when optional discovery components fail;
++7. runs the non-mutating safe business verification automatically after apply.
++
++## External scenario status
++
