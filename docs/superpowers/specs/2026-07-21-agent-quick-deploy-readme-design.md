@@ -31,7 +31,7 @@ It contains:
 The universal prompt must instruct the Agent to:
 
 - deploy `https://github.com/Inupedia/openclaw-nas-media-agent` on the current NAS or Linux Docker host;
-- first read `AGENTS.md`, `docs/AGENT_DEPLOY.md`, `docs/deployment/QUICKSTART.md`, `SECURITY.md`, `EXISTING_OPENCLAW.md`, `QAS_LOGIN.md`, `PROXY.md`, and `TROUBLESHOOTING.md`;
+- first read `AGENTS.md`, `docs/AGENT_DEPLOY.md`, `docs/deployment/QUICKSTART.md`, `docs/deployment/SECURITY.md`, `docs/deployment/EXISTING_OPENCLAW.md`, `docs/deployment/QAS_LOGIN.md`, `docs/deployment/PROXY.md`, and `docs/deployment/TROUBLESHOOTING.md`;
 - use `deploy/cli.py` and follow its JSON `status`, `nextAction`, and error codes;
 - perform discovery and planning before changes;
 - reuse existing OpenClaw, QAS, PanSou, aria2, networks, and mounts when safely identifiable;
@@ -99,11 +99,11 @@ Remain the authoritative execution contract for the Agent. Do not duplicate all 
 
 Remain focused on their current specialist roles:
 
-- `EXISTING_OPENCLAW.md`: detailed manual/operator workflow;
-- `SECURITY.md`: credentials, permissions, protected paths, and confirmation rules;
-- `QAS_LOGIN.md`: login and initialization handling;
-- `PROXY.md`: PanSou and proxy handling;
-- `TROUBLESHOOTING.md`: failure diagnosis.
+- `docs/deployment/EXISTING_OPENCLAW.md`: detailed manual/operator workflow;
+- `docs/deployment/SECURITY.md`: credentials, permissions, protected paths, and confirmation rules;
+- `docs/deployment/QAS_LOGIN.md`: login and initialization handling;
+- `docs/deployment/PROXY.md`: PanSou and proxy handling;
+- `docs/deployment/TROUBLESHOOTING.md`: failure diagnosis.
 
 ## Consistency rules
 
