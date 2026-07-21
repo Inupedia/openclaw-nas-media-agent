@@ -10,25 +10,24 @@ class ReadmeContractTests(unittest.TestCase):
 
     def test_readme_starts_with_agent_first_installation(self):
         content = self.readme_path.read_text(encoding="utf-8")
-        first_install = content.index("请把这个 GitHub 项目安装到我的 NAS")
-        manual_install = content.index("git clone")
+        first_install = content.index("python3 deploy/cli.py init")
+        manual_install = content.index("## 手动部署")
         self.assertLess(first_install, manual_install)
+        self.assertIn("确定性部署", content[:manual_install])
 
     def test_readme_documents_verified_nas_flow_and_safety(self):
         content = self.readme_path.read_text(encoding="utf-8")
         for required in (
             "UGREEN",
-            "/volume2/downloads",
-            "/volume2/影视",
-            "/volume3/临时影视",
+            "/nas/downloads",
+            "正式媒体库",
             "mediactl",
             "QAS_BASE_URL",
             "PANSOU_BASE_URL",
             "ARIA2_RPC_URL",
             ".env.example",
-            "VIDEOMGR",
             "drama",
-            "中英双语",
+            "中英字幕",
             "https://github.com/Inupedia/openclaw-nas-media-agent.git",
         ):
             self.assertIn(required, content)
@@ -47,9 +46,10 @@ class ReadmeContractTests(unittest.TestCase):
     def test_readme_documents_local_and_aggregated_preview_flow(self):
         content = self.readme_path.read_text(encoding="utf-8")
         self.assertIn("NAS 本地", content)
-        self.assertIn("QAS + PanSou", content)
-        self.assertIn("QAS 预览", content)
-        self.assertIn("discoverySources", content)
+        self.assertIn("QAS", content)
+        self.assertIn("PanSou", content)
+        self.assertIn("预览夸克分享", content)
+        self.assertIn("candidateId", content)
 
     def test_repository_declares_mit_license(self):
         license_path = self.readme_path.parent / "LICENSE"

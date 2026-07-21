@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Inupedia/openclaw-nas-media-agent/deploy/schemas/config.schema.json",
+  "title": "OpenClaw NAS Media Agent deployment configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deployment",
+    "nas",
+    "openclaw",
+    "qas",
+    "aria2",
+    "pansou",
+    "jiaofu",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "platform",
+        "project_dir",
+        "timezone",
+        "allow_reuse_existing_services"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["existing-openclaw"]
+        },
+        "platform": {
+          "enum": ["auto", "ugos", "linux", "experimental"]
+        },
+        "project_dir": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "timezone": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "allow_reuse_existing_services": {
+          "type": "boolean"
+        }
+      }
+    },
+    "nas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["downloads_dir", "organizing_dir", "libraries"],
+      "properties": {
+        "downloads_dir": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "organizing_dir": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "libraries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["movie", "drama", "anime", "documentary", "show", "other"],
+          "properties": {
+            "movie": {"$ref": "#/$defs/nonEmptyString"},
+            "drama": {"$ref": "#/$defs/nonEmptyString"},
+            "anime": {"$ref": "#/$defs/nonEmptyString"},
+            "documentary": {"$ref": "#/$defs/nonEmptyString"},
+            "show": {"$ref": "#/$defs/nonEmptyString"},
+            "other": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        }
+      }
+    },
+    "openclaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_name", "workspace_host_dir", "config_host_path"],
+      "properties": {
+        "container_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workspace_host_dir": {
+          "$ref": "#/$defs/autoOrPath"
+        },
+        "config_host_path": {
+          "$ref": "#/$defs/autoOrPath"
+        }
+      }
+    },
+    "qas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "port",
+        "username",
+        "password_secret",
+        "api_token_secret",
+        "quark_cookie_secret"
+      ],
+      "properties": {
+        "mode": {"$ref": "#/$defs/serviceMode"},
+        "port": {"$ref": "#/$defs/port"},
+        "username": {"$ref": "#/$defs/nonEmptyString"},
+        "password_secret": {"$ref": "#/$defs/secretName"},
+        "api_token_secret": {"$ref": "#/$defs/secretName"},
+        "quark_cookie_secret": {"$ref": "#/$defs/secretName"}
+      }
+    },
+    "aria2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "rpc_port", "rpc_secret", "uid", "gid"],
+      "properties": {
+        "mode": {"$ref": "#/$defs/serviceMode"},
+        "rpc_port": {"$ref": "#/$defs/port"},
+        "rpc_secret": {"$ref": "#/$defs/secretName"},
+        "uid": {"$ref": "#/$defs/autoOrId"},
+        "gid": {"$ref": "#/$defs/autoOrId"}
+      }
+    },
+    "pansou": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "mode",
+        "port",
+        "channels",
+        "plugins",
+        "max_candidates",
+        "proxy"
+      ],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "mode": {"$ref": "#/$defs/serviceMode"},
+        "port": {"$ref": "#/$defs/port"},
+        "channels": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonEmptyString"},
+          "uniqueItems": true
+        },
+        "plugins": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonEmptyString"},
+          "uniqueItems": true
+        },
+        "max_candidates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "proxy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "enum": ["none", "existing", "managed"]
+            },
+            "url_secret": {"$ref": "#/$defs/secretName"},
+            "singbox_config_secret": {"$ref": "#/$defs/secretName"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"mode": {"const": "existing"}}},
+              "then": {"required": ["url_secret"]}
+            },
+            {
+              "if": {"properties": {"mode": {"const": "managed"}}},
+              "then": {"required": ["singbox_config_secret"]}
+            }
+          ]
+        }
+      }
+    },
+    "jiaofu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "storage_state_secret", "max_candidates"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "storage_state_secret": {"$ref": "#/$defs/secretName"},
+        "max_candidates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "safe",
+        "safe_query",
+        "allow_real_download",
+        "full_test_share_url_secret",
+        "max_test_bytes"
+      ],
+      "properties": {
+        "safe": {"type": "boolean"},
+        "safe_query": {"$ref": "#/$defs/nonEmptyString"},
+        "allow_real_download": {"type": "boolean"},
+        "full_test_share_url_secret": {"$ref": "#/$defs/secretName"},
+        "max_test_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "secretName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "serviceMode": {
+      "enum": ["auto", "reuse", "managed", "disabled"]
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "autoOrPath": {
+      "anyOf": [
+        {"const": "auto"},
+        {"$ref": "#/$defs/nonEmptyString"}
+      ]
+    },
+    "autoOrId": {
+      "anyOf": [
+        {"const": "auto"},
+        {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      ]
+    }
+  }
+}

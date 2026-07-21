@@ -17,6 +17,9 @@ metadata:
       - name: QAS_TOKEN
         required: false
         description: QAS API credential; required at runtime for remote discovery/download
+      - name: QAS_TOKEN_FILE
+        required: false
+        description: Read-only file containing QAS_TOKEN; preferred by deterministic deployment
       - name: PANSOU_BASE_URL
         required: false
         description: Optional PanSou discovery endpoint
@@ -35,6 +38,9 @@ metadata:
       - name: ARIA2_RPC_SECRET
         required: false
         description: aria2 RPC credential
+      - name: ARIA2_RPC_SECRET_FILE
+        required: false
+        description: Read-only file containing ARIA2_RPC_SECRET; preferred by deterministic deployment
       - name: ARIA2_PROBE_URL
         required: false
         description: HTTP(S) URL for check-ready write probe; set skip to disable

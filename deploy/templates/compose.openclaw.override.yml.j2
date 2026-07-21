@@ -1,0 +1,52 @@
+services:
+  {{ service_name }}:
+    networks:
+      - openclaw_media
+    environment:
+      QAS_BASE_URL: "http://qas:5005"
+      QAS_TOKEN_FILE: "/run/secrets/openclaw_media_qas_token"
+      PANSOU_BASE_URL: "http://pansou:8888"
+      PANSOU_MAX_CANDIDATES: {{ pansou_max_candidates | yaml_quote }}
+      ARIA2_RPC_URL: "http://aria2:6800/jsonrpc"
+      ARIA2_RPC_SECRET_FILE: "/run/secrets/openclaw_media_aria2_rpc_secret"
+    volumes:
+      - type: bind
+        source: {{ qas_token_file | yaml_quote }}
+        target: /run/secrets/openclaw_media_qas_token
+        read_only: true
+      - type: bind
+        source: {{ aria2_secret_file | yaml_quote }}
+        target: /run/secrets/openclaw_media_aria2_rpc_secret
+        read_only: true
+      - type: bind
+        source: {{ downloads_host | yaml_quote }}
+        target: /nas/downloads
+      - type: bind
+        source: {{ movie_host | yaml_quote }}
+        target: /nas/library/movie
+        read_only: true
+      - type: bind
+        source: {{ drama_host | yaml_quote }}
+        target: /nas/library/drama
+        read_only: true
+      - type: bind
+        source: {{ anime_host | yaml_quote }}
+        target: /nas/library/anime
+        read_only: true
+      - type: bind
+        source: {{ documentary_host | yaml_quote }}
+        target: /nas/library/documentary
+        read_only: true
+      - type: bind
+        source: {{ show_host | yaml_quote }}
+        target: /nas/library/show
+        read_only: true
+      - type: bind
+        source: {{ other_host | yaml_quote }}
+        target: /nas/library/other
+        read_only: true
+
+networks:
+  openclaw_media:
+    external: true
+    name: openclaw-media

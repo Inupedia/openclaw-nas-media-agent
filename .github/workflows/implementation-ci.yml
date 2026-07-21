@@ -1,0 +1,69 @@
+name: Implementation Verification
+
+on:
+  push:
+    branches:
+      - feat/existing-openclaw-deployer
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install locked deployment dependencies
+        run: python3 -m pip install --require-hashes -r deploy/requirements.lock
+      - name: Run existing test suite
+        id: tests
+        shell: bash
+        run: |
+          set +e
+          python3 -m unittest discover -s tests -v > /tmp/unittest.log 2>&1
+          status=$?
+          tail -n 100 /tmp/unittest.log
+          exit "$status"
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unittest-log
+          path: /tmp/unittest.log
+          if-no-files-found: error
+          retention-days: 3
+      - name: Validate committed JSON
+        run: |
+          python3 -m json.tool config/routing.json >/dev/null
+          python3 -m json.tool config/commands.json >/dev/null
+          python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
+      - name: Build sanitized source snapshot
+        if: always()
+        shell: bash
+        run: |
+          tar \
+            --exclude=.git \
+            --exclude=.deploy-venv \
+            --exclude=.venv \
+            --exclude='deploy/config.yaml' \
+            --exclude='deploy/secrets' \
+            --exclude='deploy/runtime' \
+            --exclude='*.db' \
+            --exclude='*.db-shm' \
+            --exclude='*.db-wal' \
+            -czf /tmp/source-snapshot.tar.gz .
+      - name: Upload source snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot
+          path: /tmp/source-snapshot.tar.gz
+          if-no-files-found: error
+          retention-days: 1

@@ -1,0 +1,9 @@
+{
+  "loginSelectors": ["input[name=username]", "input[name=password]"],
+  "knownNonAuthSelectors": {
+    "aria2HostPort": "[data-qas-field=aria2-host-port]",
+    "aria2Dir": "[data-qas-field=aria2-dir]",
+    "save": "[data-qas-action=save]"
+  },
+  "identityChallengeTerms": ["二维码", "扫码", "captcha", "验证码"]
+}

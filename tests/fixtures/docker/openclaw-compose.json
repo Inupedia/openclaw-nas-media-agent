@@ -1,0 +1,19 @@
+{
+  "name": "openclaw",
+  "services": {
+    "gateway": {
+      "image": "ghcr.io/openclaw/openclaw:1.0.0",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/volume1/openclaw",
+          "target": "/root/.openclaw/workspace",
+          "read_only": false
+        }
+      ],
+      "networks": {
+        "default": null
+      }
+    }
+  }
+}

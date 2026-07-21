@@ -28,9 +28,10 @@ from quark_client import USER_AGENT, QuarkClient
 from qas_client import ClientError, QasClient
 from state_store import PlanError, StateStore
 from download_fs import (
+    DownloadFsError,
     ensure_aria2_writable,
     ensure_managed_download_roots,
-    is_world_writable,
+    probe_writable,
 )
 
 
@@ -675,8 +676,9 @@ class ResourceAgent:
         if "18" in error_codes:
             notes.append(
                 "aria2_error_18: Download aborted - often missing/unwritable "
-                "staging dir under /volume2/downloads/.incoming (chmod 777) "
-                "or Quark/QAS failed to push files"
+                "staging dir under downloads/.incoming; verify the discovered "
+                "UID/GID, shared group, ACL, or managed fallback permissions, "
+                "or check whether Quark/QAS failed to push files"
             )
         if "16" in error_codes and staging_files == 0:
             notes.append(
@@ -838,22 +840,17 @@ class ResourceAgent:
         for root in staging_roots:
             try:
                 ensure_aria2_writable(root)
-            except OSError:
-                pass
-            if not root.is_dir() or not os.access(root, os.W_OK):
+            except (OSError, DownloadFsError) as error:
                 return {
                     "ok": False,
                     "nextAction": "fix_path_permissions",
-                    "error": f"staging path is not writable: {root}",
+                    "error": f"unable to prepare staging path {root}: {error}",
                 }
-            if os.name == "posix" and not is_world_writable(root):
+            if not probe_writable(root):
                 return {
                     "ok": False,
                     "nextAction": "fix_path_permissions",
-                    "error": (
-                        f"staging path is not world-writable for aria2 nobody: "
-                        f"{root} (chmod 777 required)"
-                    ),
+                    "error": f"staging path failed effective write probe: {root}",
                 }
         path_check = self._check_library_roots()
         if not path_check.get("ok"):
@@ -1074,8 +1071,52 @@ def hydrate_skill_env_from_openclaw(
     return []
 
 
+def hydrate_secret_env_from_files(*, only_if_missing: bool = True) -> list[str]:
+    """Load supported credential environment variables from private files."""
+    mappings = {
+        "ARIA2_RPC_SECRET": "ARIA2_RPC_SECRET_FILE",
+        "QAS_TOKEN": "QAS_TOKEN_FILE",
+    }
+    loaded: list[str] = []
+    for target_name in sorted(mappings):
+        if only_if_missing and str(os.environ.get(target_name) or "").strip():
+            continue
+        file_name = mappings[target_name]
+        configured = str(os.environ.get(file_name) or "").strip()
+        if not configured:
+            continue
+        path = Path(configured)
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise OSError("not a regular secret file")
+            mode = path.stat().st_mode & 0o777
+            if mode & 0o077:
+                raise OSError("secret file permissions are too broad")
+            value = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise AgentError(
+                f"unable to read secret file for {target_name}: {type(error).__name__}",
+                code="SECRET_FILE_UNAVAILABLE",
+                next_action="fix_secret_file_mount",
+            ) from None
+        if value.endswith("\r\n"):
+            value = value[:-2]
+        elif value.endswith("\n"):
+            value = value[:-1]
+        if not value:
+            raise AgentError(
+                f"secret file for {target_name} is empty",
+                code="SECRET_FILE_EMPTY",
+                next_action="fill_secret_file",
+            )
+        os.environ[target_name] = value
+        loaded.append(target_name)
+    return loaded
+
+
 def _load_runtime(command: str | None = None, *, contract_key: str | None = None):
     hydrate_skill_env_from_openclaw()
+    hydrate_secret_env_from_files()
     base_dir = Path(__file__).resolve().parents[1]
     with open(
         base_dir / "config" / "routing.json",

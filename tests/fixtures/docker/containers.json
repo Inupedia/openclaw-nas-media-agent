@@ -1,0 +1,16 @@
+[
+  {
+    "ID": "111111111111",
+    "Image": "ghcr.io/openclaw/openclaw:1.0.0",
+    "Names": "openclaw-gateway",
+    "State": "running",
+    "Status": "Up 2 hours (healthy)"
+  },
+  {
+    "ID": "222222222222",
+    "Image": "cp0204/quark-auto-save:0.3.0",
+    "Names": "openclaw-media-qas",
+    "State": "running",
+    "Status": "Up 2 hours"
+  }
+]

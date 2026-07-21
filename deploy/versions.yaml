@@ -1,0 +1,23 @@
+schema_version: 1
+resolved_at: "2026-07-20"
+components:
+  qas:
+    image: cp0204/quark-auto-save@sha256:4d97439c0cd095c5fb8ef7133ca4726c8a3f996fa319f8c049180270b61c29be
+    adapter: qas_v1
+    release: v0.8.7
+  pansou:
+    image: ghcr.io/fish2018/pansou@sha256:9627039c1f081e9a5668f7897ff52c32a79cd7e8422349d659f4192e317bf693
+    adapter: pansou_v1
+    release: resolved-2026-07-20
+  aria2:
+    image: p3terx/aria2-pro@sha256:086d1a37c586edb07ec0fb956bf9edd89d1d38d138ad5309ff96d510c8c9a011
+    adapter: aria2_v1
+    release: resolved-2026-07-20
+  sing_box:
+    image: ghcr.io/sagernet/sing-box@sha256:da0e2331395c9025a85fa58892772b4cdbe5f2e530e93defeec3968175d06c6d
+    adapter: sing_box_v1
+    release: v1.13.12
+  playwright:
+    image: mcr.microsoft.com/playwright/python@sha256:a9731514f24121d1dcd25d58d0a38146646d290a5998fd80d3e533e7b5e21c69
+    adapter: playwright_v1_61
+    release: v1.61.0-noble

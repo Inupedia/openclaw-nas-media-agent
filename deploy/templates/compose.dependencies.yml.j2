@@ -1,0 +1,70 @@
+name: openclaw-media-dependencies
+
+services:
+  qas:
+    image: {{ images.qas | yaml_quote }}
+    container_name: openclaw-media-qas
+    restart: unless-stopped
+    environment:
+      TZ: {{ timezone | yaml_quote }}
+      WEBUI_USERNAME: {{ qas.username | yaml_quote }}
+      WEBUI_PASSWORD: {{ secret_refs.qas_webui_password | yaml_quote }}
+    volumes:
+      - type: bind
+        source: {{ paths.qas_config | yaml_quote }}
+        target: /app/config
+    ports:
+      - {{ ports.qas | yaml_quote }}
+    networks:
+      - media
+
+  pansou:
+    image: {{ images.pansou | yaml_quote }}
+    container_name: openclaw-media-pansou
+    restart: unless-stopped
+    environment:
+      TZ: {{ timezone | yaml_quote }}
+      PORT: "8888"
+      CHANNELS: {{ pansou.channels | yaml_quote }}
+      ENABLED_PLUGINS: {{ pansou.plugins | yaml_quote }}
+      CACHE_PATH: /app/cache
+      PROXY: {{ secret_refs.pansou_proxy_url | yaml_quote }}
+      HTTP_PROXY: {{ secret_refs.pansou_http_proxy | yaml_quote }}
+      HTTPS_PROXY: {{ secret_refs.pansou_https_proxy | yaml_quote }}
+    volumes:
+      - type: bind
+        source: {{ paths.pansou_cache | yaml_quote }}
+        target: /app/cache
+    ports:
+      - {{ ports.pansou | yaml_quote }}
+    networks:
+      - media
+
+  aria2:
+    image: {{ images.aria2 | yaml_quote }}
+    container_name: openclaw-media-aria2
+    restart: unless-stopped
+    environment:
+      TZ: {{ timezone | yaml_quote }}
+      PUID: {{ aria2.puid | yaml_quote }}
+      PGID: {{ aria2.pgid | yaml_quote }}
+      RPC_SECRET: {{ secret_refs.aria2_rpc_secret | yaml_quote }}
+      RPC_PORT: "6800"
+      LISTEN_PORT: "6888"
+    volumes:
+      - type: bind
+        source: {{ paths.aria2_config | yaml_quote }}
+        target: /config
+      - type: bind
+        source: {{ paths.downloads | yaml_quote }}
+        target: /nas/downloads
+    ports:
+      - {{ ports.aria2_rpc | yaml_quote }}
+      - "6888:6888"
+      - "6888:6888/udp"
+    networks:
+      - media
+
+networks:
+  media:
+    name: openclaw-media

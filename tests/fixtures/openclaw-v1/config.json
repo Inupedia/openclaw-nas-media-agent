@@ -1,0 +1,16 @@
+{
+  "skills": {
+    "entries": {
+      "resource-download-agent": {
+        "env": {}
+      }
+    }
+  },
+  "tools": {
+    "exec": {
+      "security": "allowlist",
+      "ask": "off",
+      "allowlist": ["/old/mediactl"]
+    }
+  }
+}

@@ -108,45 +108,23 @@ flowchart LR
 | aria2 | 执行真实下载并提供 RPC 状态 | 远端流程必需 |
 | ffprobe | 增强视频可读性校验 | 可选 |
 
-## 最快安装方式：把项目交给 Agent
+## 确定性部署（已有 OpenClaw）
 
-将下面整段发给运行在 NAS 上、具有 Docker 管理权限的 Agent：
+部署不再依赖 Agent 临场拼装命令。Agent 和人工用户都调用仓库内同一套 Python 部署器：
 
-```text
-请部署这个项目：
-https://github.com/Inupedia/openclaw-nas-media-agent
-
-必须先阅读：
-- README.md
-- docs/AGENT_DEPLOY.md
-- SKILL.md
-- config/routing.json
-- deploy/docker-compose.dependencies.yml
-
-请分两个阶段执行：
-
-阶段 A：只检查，不修改
-1. 识别 NAS 类型、CPU 架构、Docker Compose 版本和 OpenClaw workspace。
-2. 检查 QAS、PanSou、aria2 是否已经存在，避免重复部署。
-3. 请我确认下载目录、正式影视库、临时影视库的真实主机路径。
-4. 输出拟采用的容器网络、端口、卷挂载、环境变量和回滚方案。
-5. 不得输出 Cookie、Token、RPC Secret 或完整内网地址。
-
-阶段 B：我确认后再部署
-1. 将项目安装到 OpenClaw workspace/skills/resource-download-agent。
-2. 缺失的依赖容器参考 deploy/docker-compose.dependencies.yml 部署；已有服务优先复用。
-3. 让 OpenClaw 和 aria2 挂载同一个主机下载目录：
-   - OpenClaw 内路径与 routing.json 的 agent_root 一致；
-   - aria2 内固定映射为 /nas/downloads。
-4. 根据真实路径修改 config/routing.json，不得照搬示例卷名。
-5. 配置 QAS_BASE_URL、QAS_TOKEN、PANSOU_BASE_URL、ARIA2_RPC_URL、ARIA2_RPC_SECRET 和 RESOURCE_AGENT_STATE_DB。
-6. OpenClaw exec 使用 allowlist，只允许本项目 bin/mediactl 的固定绝对路径。
-7. 正式媒体库不得作为下载目标，不得删除、覆盖或清理已有内容。
-8. 运行单元测试、mediactl check-ready 和一次“只预览、不下载”的搜索验收。
-9. 最终报告安装路径、容器状态、挂载对应关系、测试结果、备份和回滚命令。
+```bash
+python3 deploy/cli.py init
+python3 deploy/cli.py discover
+python3 deploy/cli.py plan
+python3 deploy/cli.py apply --plan-id PLAN_ID --confirmed
+python3 deploy/cli.py verify --level safe
 ```
 
-更完整的机器执行规则见 **[Agent 部署手册](docs/AGENT_DEPLOY.md)**。
+部署器使用 `deploy/config.yaml` 作为唯一配置源，使用独立 `deploy/secrets/` 保存密码、Cookie、Token 和代理配置。它负责只读发现、不可变计划、固定镜像、配置渲染、事务日志、分层验收和回滚。
+
+只有登录、扫码、验证码、冲突选择和危险操作确认需要用户参与。首版正式支持绿联 UGOS 和标准 Linux Docker，其他 NAS 平台按实验性兼容处理。
+
+详细步骤见 **[快速部署](docs/deployment/QUICKSTART.md)** 和 **[已有 OpenClaw 模式](docs/deployment/EXISTING_OPENCLAW.md)**。
 
 ## 手动部署
 

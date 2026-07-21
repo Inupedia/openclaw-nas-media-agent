@@ -1,0 +1,18 @@
+{
+  "cookie": ["***"],
+  "crontab": "0 8,18,20 * * *",
+  "magic_regex": {},
+  "plugins": {
+    "aria2": {
+      "dir": "/Downloads",
+      "host_port": "172.17.0.1:6800",
+      "secret": "***"
+    }
+  },
+  "push_config": {},
+  "tasklist": [],
+  "webui": {
+    "password": "***",
+    "username": "fixture-admin"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "data": {
+    "cookie": ["***"],
+    "plugins": {
+      "aria2": {
+        "host_port": "aria2:6800",
+        "secret": "***",
+        "dir": "/nas/downloads"
+      }
+    },
+    "api_token": "***"
+  }
+}
