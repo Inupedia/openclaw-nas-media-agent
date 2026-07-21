@@ -1,0 +1,75 @@
+name: Apply Verified Task 16
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: task16-apply-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/existing-openclaw-deployer'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/existing-openclaw-deployer
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Assemble and authenticate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          parts=(.github/task16.patch.part*)
+          test "${#parts[@]}" -eq 5
+          cat "${parts[@]}" > /tmp/task16.patch
+          actual="$(sha256sum /tmp/task16.patch | awk '{print $1}')"
+          expected='2d3cf63d703ae468143bb973178d2e6e45047301bbca0b638539829e3af2b882'
+          test "$actual" = "$expected"
+          git apply --check /tmp/task16.patch
+          git apply /tmp/task16.patch
+          rm "${parts[@]}"
+      - name: Install locked dependencies
+        run: python3 -m pip install --require-hashes -r deploy/requirements.lock
+      - name: Run complete verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -v
+          python3 -m json.tool deploy/schemas/config.schema.json >/dev/null
+          python3 -m json.tool config/routing.json >/dev/null
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in (
+              Path('deploy/config.example.yaml'),
+              Path('deploy/versions.yaml'),
+              Path('deploy/docker-compose.dependencies.yml'),
+              Path('.github/workflows/implementation-ci.yml'),
+              Path('.github/workflows/deploy-tests.yml'),
+          ):
+              yaml.safe_load(path.read_text(encoding='utf-8'))
+          PY
+          python3 -m py_compile deploy/installer/*.py deploy/installer/adapters/*.py scripts/*.py
+          git diff --check
+          test "$(grep -c '^permissions:$' .github/workflows/implementation-ci.yml)" -eq 1
+          grep -A1 '^permissions:$' .github/workflows/implementation-ci.yml | grep -q 'contents: read'
+      - name: Commit verified integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(deploy): complete existing OpenClaw integration verification'
+          git push origin HEAD:feat/existing-openclaw-deployer
